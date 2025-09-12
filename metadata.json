@@ -1,0 +1,5 @@
+{
+  "name": "Gemini CRM",
+  "description": "An intelligent CRM application that helps you track contacts, manage your outreach pipeline, and generates AI-powered follow-up suggestions using the Gemini API.",
+  "requestFramePermissions": []
+}
