@@ -177,6 +177,11 @@ const App: React.FC = () => {
     setContacts(prev => [newContact, ...prev]);
   }, []);
 
+  const handleDeleteContact = useCallback((contactId: string) => {
+    setContacts(prev => prev.filter(c => c.id !== contactId));
+    setSelectedContact(null);
+  }, []);
+
   const handleTaskUpdate = useCallback((updatedTask: Task) => {
     setTasks(prev => prev.map(t => t.id === updatedTask.id ? updatedTask : t));
   }, []);
@@ -288,7 +293,7 @@ const App: React.FC = () => {
       <main className="p-4 sm:p-6 lg:p-8">
         {renderView()}
       </main>
-      {selectedContact && <ContactModal contact={selectedContact} onClose={() => setSelectedContact(null)} onUpdate={handleContactUpdate} onAddInteraction={handleAddInteraction} onSyncGmail={handleSyncGmail} isGmailConnected={googleAuthState.isAuthenticated} settings={settings} tasks={tasks.filter(t => t.contactId === selectedContact.id)} onTaskAdd={handleTaskAdd} onTaskUpdate={handleTaskUpdate} onTaskDelete={handleTaskDelete} />}
+      {selectedContact && <ContactModal contact={selectedContact} onClose={() => setSelectedContact(null)} onUpdate={handleContactUpdate} onAddInteraction={handleAddInteraction} onSyncGmail={handleSyncGmail} isGmailConnected={googleAuthState.isAuthenticated} settings={settings} tasks={tasks.filter(t => t.contactId === selectedContact.id)} onTaskAdd={handleTaskAdd} onTaskUpdate={handleTaskUpdate} onTaskDelete={handleTaskDelete} onDelete={handleDeleteContact} />}
       {isImportModalOpen && <ImportModal onClose={() => setImportModalOpen(false)} existingContacts={contacts} onImport={(newContacts, updatedContacts) => { setContacts(prev => { const updatedMap = new Map(updatedContacts.map(c => [c.id, c])); const unchanged = prev.filter(c => !updatedMap.has(c.id)); return [...newContacts, ...updatedContacts, ...unchanged]; }); setImportModalOpen(false); }} />}
       {isNewContactModalOpen && <NewContactModal onClose={() => setNewContactModalOpen(false)} onCreateContact={(data) => { handleCreateContact(data); setNewContactModalOpen(false); }} pipelineStages={settings.pipelineStages}/>}
     </div>

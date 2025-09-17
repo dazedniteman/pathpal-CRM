@@ -1,5 +1,5 @@
 
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { Contact, TableFilter, PartnershipType } from '../types';
 import { SearchIcon, SortAscIcon, SortDescIcon, XCircleIcon, TagIcon } from './icons';
 
@@ -14,6 +14,17 @@ interface TableViewProps {
 
 type SortableContactKeys = 'name' | 'email' | 'pipelineStage' | 'location' | 'followers' | 'following' | 'posts' | 'lastContacted' | 'instagramHandle' | 'partnershipType';
 type SortConfig = { key: SortableContactKeys; direction: 'ascending' | 'descending'; } | null;
+
+const columnsConfig: { key: SortableContactKeys; label: string; defaultWidth: number; }[] = [
+    { key: 'name', label: 'Name', defaultWidth: 250 },
+    { key: 'pipelineStage', label: 'Stage', defaultWidth: 150 },
+    { key: 'partnershipType', label: 'Deal Type', defaultWidth: 120 },
+    { key: 'instagramHandle', label: 'Instagram', defaultWidth: 200 },
+    { key: 'followers', label: 'Followers', defaultWidth: 100 },
+    { key: 'following', label: 'Following', defaultWidth: 100 },
+    { key: 'posts', label: 'Posts', defaultWidth: 100 },
+    { key: 'lastContacted', label: 'Last Contacted', defaultWidth: 150 },
+];
 
 const useSortableData = (items: Contact[], config: SortConfig = null) => {
   const sortedItems = useMemo(() => {
@@ -45,6 +56,49 @@ export const TableView: React.FC<TableViewProps> = ({ contacts, pipelineStages, 
   const [selectedContactIds, setSelectedContactIds] = useState<string[]>([]);
   const [bulkStage, setBulkStage] = useState('');
   const [bulkTags, setBulkTags] = useState('');
+  const [columnWidths, setColumnWidths] = useState<Record<string, number>>(() => {
+    try {
+        const savedWidths = localStorage.getItem('crm_table_widths');
+        if (savedWidths) return JSON.parse(savedWidths);
+    } catch (e) { console.error("Could not parse column widths from localStorage", e); }
+    return columnsConfig.reduce((acc, col) => ({ ...acc, [col.key]: col.defaultWidth }), {});
+  });
+
+  const tableRef = useRef<HTMLTableElement>(null);
+  const isResizing = useRef<string | null>(null);
+
+  const handleMouseDown = useCallback((key: string) => {
+    isResizing.current = key;
+  }, []);
+
+  const handleMouseMove = useCallback((e: MouseEvent) => {
+    if (isResizing.current && tableRef.current) {
+        const th = tableRef.current.querySelector(`th[data-col-key="${isResizing.current}"]`) as HTMLElement;
+        if (th) {
+            const newWidth = e.clientX - th.getBoundingClientRect().left;
+            if (newWidth > 50) { // minimum width
+                setColumnWidths(prev => ({...prev, [isResizing.current!]: newWidth }));
+            }
+        }
+    }
+  }, []);
+
+  const handleMouseUp = useCallback(() => {
+    if (isResizing.current) {
+        isResizing.current = null;
+        localStorage.setItem('crm_table_widths', JSON.stringify(columnWidths));
+    }
+  }, [columnWidths]);
+
+  useEffect(() => {
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+        window.removeEventListener('mousemove', handleMouseMove);
+        window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [handleMouseMove, handleMouseUp]);
+
 
   const allTags = useMemo(() => Array.from(new Set(contacts.flatMap(c => c.tags || []))), [contacts]);
 
@@ -105,8 +159,6 @@ export const TableView: React.FC<TableViewProps> = ({ contacts, pipelineStages, 
     setBulkTags('');
   };
 
-  const columns: { key: SortableContactKeys; label: string; }[] = [ { key: 'name', label: 'Name' }, { key: 'pipelineStage', label: 'Stage' }, { key: 'partnershipType', label: 'Deal Type'}, { key: 'instagramHandle', label: 'Instagram' }, { key: 'followers', label: 'Followers' }, { key: 'lastContacted', label: 'Last Contacted' }, ];
-
   return (
     <div className="bg-secondary p-6 rounded-lg shadow-lg">
       <h2 className="text-3xl font-bold text-white mb-6">All Contacts</h2>
@@ -131,24 +183,36 @@ export const TableView: React.FC<TableViewProps> = ({ contacts, pipelineStages, 
       )}
 
       <div className="overflow-x-auto">
-        <table className="w-full text-left whitespace-nowrap">
+        <table ref={tableRef} className="w-full text-left table-fixed">
           <thead className="border-b border-accent">
             <tr>
-              <th className="p-3"><input type="checkbox" className="form-checkbox bg-primary text-highlight" onChange={handleSelectAll} checked={selectedContactIds.length > 0 && selectedContactIds.length === sortedContacts.length} /></th>
-              {columns.map(({key, label}) => ( <th key={key} className="p-3 text-sm font-semibold text-text-secondary uppercase"><button onClick={() => requestSort(key)} className="flex items-center space-x-1"><span>{label}</span>{sortConfig?.key === key ? (sortConfig.direction === 'ascending' ? <SortAscIcon/> : <SortDescIcon/>) : null}</button></th> ))}
-              <th className="p-3 text-sm font-semibold text-text-secondary uppercase">Tags</th>
-              <th className="p-3 text-sm font-semibold text-text-secondary uppercase">Partner Details</th>
+              <th className="p-3 w-12"><input type="checkbox" className="form-checkbox bg-primary text-highlight" onChange={handleSelectAll} checked={selectedContactIds.length > 0 && selectedContactIds.length === sortedContacts.length} /></th>
+              {columnsConfig.map(({key, label}) => ( 
+                <th key={key} data-col-key={key} style={{width: `${columnWidths[key]}px`}} className="p-3 text-sm font-semibold text-text-secondary uppercase relative">
+                  <button onClick={() => requestSort(key)} className="flex items-center space-x-1">
+                    <span>{label}</span>{sortConfig?.key === key ? (sortConfig.direction === 'ascending' ? <SortAscIcon/> : <SortDescIcon/>) : null}
+                  </button>
+                  <div onMouseDown={() => handleMouseDown(key)} className="absolute top-0 right-0 h-full w-2 cursor-col-resize" />
+                </th> 
+              ))}
+              <th className="p-3 text-sm font-semibold text-text-secondary uppercase w-48">Tags</th>
+              <th className="p-3 text-sm font-semibold text-text-secondary uppercase w-40">Partner Details</th>
             </tr>
           </thead>
           <tbody>
             {sortedContacts.map(contact => (
               <tr key={contact.id} className={`border-b border-accent transition-colors ${selectedContactIds.includes(contact.id) ? 'bg-highlight/20' : 'hover:bg-accent'}`}>
                 <td className="p-3"><input type="checkbox" className="form-checkbox bg-primary text-highlight" checked={selectedContactIds.includes(contact.id)} onChange={e => handleSelectOne(contact.id, e.target.checked)} onClick={e => e.stopPropagation()} /></td>
-                <td className="p-3 cursor-pointer" onClick={() => onSelectContact(contact)}> <div className="font-medium text-white">{contact.name}</div> <div className="text-xs text-text-secondary">{contact.email}</div> </td>
+                <td className="p-3 cursor-pointer" onClick={() => onSelectContact(contact)}> 
+                    <div className="font-medium text-white whitespace-normal break-words">{contact.name}</div> 
+                    <div className="text-xs text-text-secondary whitespace-normal break-words">{contact.email}</div> 
+                </td>
                 <td className="p-3 cursor-pointer" onClick={() => onSelectContact(contact)}><span className={`px-2 py-1 text-xs rounded-full ${ contact.pipelineStage === 'Closed - Success' ? 'bg-green-500/50 text-green-300' : contact.pipelineStage === 'Closed - Unsuccessful' ? 'bg-red-500/50 text-red-300' : 'bg-highlight/50 text-blue-300' }`}>{contact.pipelineStage}</span></td>
                 <td className="p-3 text-text-secondary cursor-pointer" onClick={() => onSelectContact(contact)}>{contact.partnershipType || 'N/A'}</td>
-                <td className="p-3 text-text-secondary cursor-pointer" onClick={() => onSelectContact(contact)}>{contact.instagramHandle ? (<a href={`https://instagram.com/${contact.instagramHandle.replace('@', '')}`} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} className="text-highlight hover:underline">{contact.instagramHandle}</a>) : 'N/A'}</td>
+                <td className="p-3 text-text-secondary cursor-pointer" onClick={() => onSelectContact(contact)}>{contact.instagramHandle ? (<a href={`https://instagram.com/${contact.instagramHandle.replace('@', '')}`} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} className="text-highlight hover:underline whitespace-normal break-all">{contact.instagramHandle}</a>) : 'N/A'}</td>
                 <td className="p-3 text-text-secondary cursor-pointer" onClick={() => onSelectContact(contact)}>{contact.followers?.toLocaleString() || 'N/A'}</td>
+                <td className="p-3 text-text-secondary cursor-pointer" onClick={() => onSelectContact(contact)}>{contact.following?.toLocaleString() || 'N/A'}</td>
+                <td className="p-3 text-text-secondary cursor-pointer" onClick={() => onSelectContact(contact)}>{contact.posts?.toLocaleString() || 'N/A'}</td>
                 <td className="p-3 text-text-secondary cursor-pointer" onClick={() => onSelectContact(contact)}>{new Date(contact.lastContacted).toLocaleDateString()}</td>
                 <td className="p-3 text-text-secondary text-xs cursor-pointer" onClick={() => onSelectContact(contact)}><div className="flex flex-wrap gap-1">{contact.tags?.map(tag => <span key={tag} className="px-1.5 py-0.5 text-xs text-blue-200 bg-highlight/50 rounded-full">{tag}</span>)}</div></td>
                 <td className="p-3 text-text-secondary text-xs cursor-pointer" onClick={() => onSelectContact(contact)}>{contact.partnerDetails ? ( <div className="space-y-1"><div>Contract: {contact.partnerDetails.contractSigned ? '✅' : '❌'}</div><div>Drills: {contact.partnerDetails.drillVideosDelivered}/{contact.partnerDetails.drillVideosAgreed}</div><div>Testimonial: {contact.partnerDetails.testimonialVideoDelivered ? '✅' : '❌'}</div></div> ) : 'N/A'}</td>
