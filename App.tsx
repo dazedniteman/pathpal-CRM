@@ -1,7 +1,6 @@
 
 import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import { supabase } from './services/supabaseClient';
-// FIX: Changed to type import for Session to potentially resolve module issues.
 import type { Session } from '@supabase/supabase-js';
 
 import { Header } from './components/Header';
@@ -295,15 +294,15 @@ const App: React.FC = () => {
   const [session, setSession] = useState<Session | null>(null);
 
   useEffect(() => {
-    // FIX: supabase.auth.getSession() is from supabase-js v2. Use v1 equivalent.
-    setSession(supabase.auth.session());
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+    });
 
-    // FIX: supabase.auth.onAuthStateChange() returns { data: { subscription } } in v2, but { data } which is the subscription in v1.
-    const { data: subscription } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSession(session)
-    })
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+    });
 
-    return () => subscription.unsubscribe()
+    return () => subscription?.unsubscribe();
   }, [])
 
   if (!session) {

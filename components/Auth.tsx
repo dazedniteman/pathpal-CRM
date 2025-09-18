@@ -24,8 +24,7 @@ export const Auth: React.FC = () => {
         setMessage('Check your email for the login link!');
       }
     } else {
-      // FIX: signInWithPassword is a v2 method. Use signIn for v1.
-      const { error } = await supabase.auth.signIn({ email, password });
+      const { error } = await supabase.auth.signInWithPassword({ email, password });
       if (error) {
         setError(error.message);
       }

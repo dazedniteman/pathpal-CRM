@@ -138,8 +138,7 @@ export const getSettings = async (): Promise<AppSettings | null> => {
 };
 
 export const saveSettings = async (settings: AppSettings): Promise<AppSettings> => {
-    // FIX: supabase.auth.getUser() is from v2 and async. Use v1's synchronous supabase.auth.user().
-    const user = supabase.auth.user();
+    const { data: { user } } = await supabase.auth.getUser();
     if (!user) throw new Error("User not authenticated");
     
     const settingsWithUser = { ...settings, user_id: user.id };
