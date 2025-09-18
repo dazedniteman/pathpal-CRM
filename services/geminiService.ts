@@ -1,21 +1,26 @@
+
 import { GoogleGenAI } from "@google/genai";
 import { Contact } from '../types';
 
-// FIX: Switched to process.env.API_KEY to align with @google/genai SDK guidelines.
-// This resolves the TypeScript errors related to `import.meta.env`.
+// At build time, Vite will replace `process.env.API_KEY` with the actual value
+// of the `VITE_GEMINI_API_KEY` environment variable from your Netlify settings.
 const apiKey = process.env.API_KEY;
 
 if (!apiKey) {
     // This check helps developers diagnose a missing API key.
-    // The user needs to set API_KEY in their environment settings.
-    console.error("Gemini API key (API_KEY) is not set in the environment variables.");
+    // Ensure `VITE_GEMINI_API_KEY` is set correctly in your Netlify environment variables.
+    console.error("Gemini API key is not set. Please check your `VITE_GEMINI_API_KEY` environment variable.");
 }
 
+// The GoogleGenAI constructor requires a valid API key.
+// The `!` asserts that apiKey is not null/undefined, which is safe
+// if the environment variable is set. The app will throw an error if it's not.
 const ai = new GoogleGenAI({ apiKey: apiKey! });
 
 export const getFollowUpSuggestion = async (contact: Contact, productContext?: string, tags?: string[]): Promise<string> => {
   if (!apiKey) {
-    return "Error: Gemini API key is not configured. Please add API_KEY to your environment variables.";
+    // Return a user-friendly error if the key is missing at runtime.
+    return "Error: Gemini API key is not configured. Please ensure `VITE_GEMINI_API_KEY` is set in the deployment settings.";
   }
   
   const interactionHistory = contact.interactions.map(i => 
