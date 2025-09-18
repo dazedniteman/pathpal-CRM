@@ -37,9 +37,13 @@ export const getContacts = async (): Promise<Contact[]> => {
 };
 
 export const createContact = async (contactData: Omit<Contact, 'id'>): Promise<Contact> => {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) throw new Error("User not authenticated to create contact.");
+
     const newContact = {
         ...contactData,
-        id: `manual-${Date.now()}`
+        id: `manual-${Date.now()}`,
+        userId: user.id,
     };
     const { data, error } = await supabase
         .from('contacts')
@@ -67,9 +71,17 @@ export const deleteContact = async (contactId: string): Promise<void> => {
 };
 
 export const bulkCreateContacts = async (contacts: Contact[]): Promise<Contact[]> => {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) throw new Error("User not authenticated to bulk create contacts.");
+
+    const contactsWithUser = contacts.map(contact => ({
+        ...contact,
+        userId: user.id
+    }));
+
     const { data, error } = await supabase
         .from('contacts')
-        .insert(contacts.map(objectToSnake))
+        .insert(contactsWithUser.map(objectToSnake))
         .select();
     handleSupabaseError(error, 'bulkCreateContacts');
     return objectToCamel(data) || [];
@@ -99,9 +111,13 @@ export const getTasks = async (): Promise<Task[]> => {
 };
 
 export const createTask = async (taskData: Omit<Task, 'id'>): Promise<Task> => {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) throw new Error("User not authenticated to create task.");
+    
     const newTask = {
         ...taskData,
-        id: `task-${Date.now()}`
+        id: `task-${Date.now()}`,
+        userId: user.id,
     };
     const { data, error } = await supabase
         .from('tasks')
@@ -141,7 +157,7 @@ export const saveSettings = async (settings: AppSettings): Promise<AppSettings> 
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) throw new Error("User not authenticated");
     
-    const settingsWithUser = { ...settings, user_id: user.id };
+    const settingsWithUser = { ...settings, userId: user.id };
     const { data, error } = await supabase
         .from('settings')
         .upsert(objectToSnake(settingsWithUser))
