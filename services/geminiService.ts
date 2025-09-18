@@ -2,10 +2,8 @@
 import { GoogleGenAI } from "@google/genai";
 import { Contact } from '../types';
 
-if (!process.env.API_KEY) {
-    console.warn("API_KEY environment variable not set. Gemini API calls will fail.");
-}
-
+// FIX: Per coding guidelines, the API key must be from process.env.API_KEY.
+// This also resolves the error "Property 'env' does not exist on type 'ImportMeta'".
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY! });
 
 export const getFollowUpSuggestion = async (contact: Contact, productContext?: string, tags?: string[]): Promise<string> => {

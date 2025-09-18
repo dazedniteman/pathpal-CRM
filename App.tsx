@@ -1,6 +1,9 @@
 
-
 import React, { useState, useCallback, useMemo, useEffect } from 'react';
+import { supabase } from './services/supabaseClient';
+// FIX: Changed to type import for Session to potentially resolve module issues.
+import type { Session } from '@supabase/supabase-js';
+
 import { Header } from './components/Header';
 import { Dashboard } from './components/Dashboard';
 import { KanbanBoard } from './components/KanbanBoard';
@@ -11,93 +14,101 @@ import { TableView } from './components/TableView';
 import { Settings } from './components/Settings';
 import { TasksView } from './components/TasksView';
 import { NewContactModal } from './components/NewContactModal';
+import { Auth } from './components/Auth';
 import { Contact, View, Interaction, AppSettings, GoogleAuthState, InteractionType, PartnershipType, TableFilter, Task } from './types';
-import { MOCK_CONTACTS, DEFAULT_PIPELINE_STAGES } from './constants';
+import { DEFAULT_PIPELINE_STAGES } from './constants';
 import { initGmailService, signIn, signOut, fetchEmailsForContact } from './services/gmailService';
+import * as db from './services/dataService';
 
-const App: React.FC = () => {
+const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
   const [view, setView] = useState<View>('dashboard');
   
-  const [contacts, setContacts] = useState<Contact[]>(() => {
-    const savedContacts = localStorage.getItem('crm_contacts');
-    return savedContacts ? JSON.parse(savedContacts) : MOCK_CONTACTS;
+  const [contacts, setContacts] = useState<Contact[]>([]);
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [settings, setSettings] = useState<AppSettings>({
+    productContext: 'Our product is a revolutionary AI-powered golf swing analysis tool that provides real-time feedback to instructors and students.',
+    defaultFollowUpDays: 30,
+    googleClientId: '',
+    pipelineStages: DEFAULT_PIPELINE_STAGES,
   });
 
-  const [tasks, setTasks] = useState<Task[]>(() => {
-    const savedTasks = localStorage.getItem('crm_tasks');
-    return savedTasks ? JSON.parse(savedTasks) : [];
-  });
-
-  const [settings, setSettings] = useState<AppSettings>(() => {
-      const savedSettings = localStorage.getItem('crm_settings');
-      return savedSettings ? JSON.parse(savedSettings) : {
-        productContext: 'Our product is a revolutionary AI-powered golf swing analysis tool that provides real-time feedback to instructors and students.',
-        defaultFollowUpDays: 30,
-        googleClientId: '',
-        pipelineStages: DEFAULT_PIPELINE_STAGES,
-      };
-  });
-
+  const [isLoading, setIsLoading] = useState(true);
   const [selectedContact, setSelectedContact] = useState<Contact | null>(null);
   const [isImportModalOpen, setImportModalOpen] = useState(false);
   const [isNewContactModalOpen, setNewContactModalOpen] = useState(false);
   const [tableFilter, setTableFilter] = useState<TableFilter | null>(null);
   const [googleAuthState, setGoogleAuthState] = useState<GoogleAuthState>({ isAuthenticated: false });
 
+  // Fetch initial data
+  useEffect(() => {
+    const fetchData = async () => {
+      setIsLoading(true);
+      const [fetchedContacts, fetchedTasks, fetchedSettings] = await Promise.all([
+        db.getContacts(),
+        db.getTasks(),
+        db.getSettings()
+      ]);
+      setContacts(fetchedContacts);
+      setTasks(fetchedTasks);
+      if (fetchedSettings) {
+        setSettings(fetchedSettings);
+      } else {
+        // If no settings exist for the user, create default ones
+        const defaultSettings = {
+          productContext: 'Our product is a revolutionary AI-powered golf swing analysis tool that provides real-time feedback to instructors and students.',
+          defaultFollowUpDays: 30,
+          googleClientId: '',
+          pipelineStages: DEFAULT_PIPELINE_STAGES,
+        };
+        await db.saveSettings(defaultSettings);
+        setSettings(defaultSettings);
+      }
+      setIsLoading(false);
+    };
+    fetchData();
+  }, []);
+
   useEffect(() => {
     initGmailService(settings.googleClientId, (authState) => {
       setGoogleAuthState(authState);
-      localStorage.setItem('crm_gmail_auth', JSON.stringify(authState));
     });
-    const savedAuth = localStorage.getItem('crm_gmail_auth');
-    if (savedAuth) {
-        setGoogleAuthState(JSON.parse(savedAuth));
-    }
   }, [settings.googleClientId]);
 
-  useEffect(() => { localStorage.setItem('crm_contacts', JSON.stringify(contacts)); }, [contacts]);
-  useEffect(() => { localStorage.setItem('crm_settings', JSON.stringify(settings)); }, [settings]);
-  useEffect(() => { localStorage.setItem('crm_tasks', JSON.stringify(tasks)); }, [tasks]);
+  const handleSettingsUpdate = useCallback(async (newSettings: AppSettings) => {
+    setSettings(newSettings);
+    await db.saveSettings(newSettings);
+  }, []);
 
-  const handleContactUpdate = useCallback((updatedContact: Contact) => {
+  const handleContactUpdate = useCallback(async (updatedContact: Contact) => {
     if (updatedContact.pipelineStage !== 'Closed - Success' && updatedContact.partnershipType) {
         updatedContact.partnershipType = undefined;
         updatedContact.partnerDetails = undefined;
     }
-    setContacts(prev => prev.map(c => c.id === updatedContact.id ? updatedContact : c));
-    setSelectedContact(updatedContact);
+    const savedContact = await db.updateContact(updatedContact);
+    setContacts(prev => prev.map(c => c.id === savedContact.id ? savedContact : c));
+    setSelectedContact(savedContact);
   }, []);
 
-  const handleBulkUpdate = useCallback((contactIds: string[], updates: Partial<Pick<Contact, 'pipelineStage' | 'tags'>>) => {
-    setContacts(prev => prev.map(c => {
-      if (contactIds.includes(c.id)) {
-        const updatedContact = { ...c, ...updates };
-        if (updates.tags && c.tags) {
-            // Merge tags and remove duplicates
-            updatedContact.tags = Array.from(new Set([...c.tags, ...updates.tags]));
-        }
-        return updatedContact;
-      }
-      return c;
-    }));
+  const handleBulkUpdate = useCallback(async (contactIds: string[], updates: Partial<Pick<Contact, 'pipelineStage' | 'tags'>>) => {
+    const updatedContacts = await db.bulkUpdateContacts(contactIds, updates);
+    const updatedMap = new Map(updatedContacts.map(c => [c.id, c]));
+    setContacts(prev => prev.map(c => updatedMap.get(c.id) || c));
   }, []);
   
-  const handleAddInteraction = useCallback((contactId: string, interaction: Interaction) => {
-    setContacts(prev => prev.map(c => {
-      if (c.id === contactId) {
-        const updatedContact: Contact = {
-          ...c,
-          interactions: [interaction, ...c.interactions],
-          lastContacted: interaction.date,
-        };
-        if (selectedContact?.id === contactId) {
-          setSelectedContact(updatedContact);
-        }
-        return updatedContact;
-      }
-      return c;
-    }));
-  }, [selectedContact]);
+  const handleAddInteraction = useCallback(async (contactId: string, interaction: Interaction) => {
+    const contactToUpdate = contacts.find(c => c.id === contactId);
+    if (!contactToUpdate) return;
+
+    const updatedInteractions = [interaction, ...contactToUpdate.interactions];
+    const lastContacted = interaction.date;
+
+    const updatedContact = await db.updateContact({ ...contactToUpdate, interactions: updatedInteractions, lastContacted });
+    
+    setContacts(prev => prev.map(c => (c.id === contactId ? updatedContact : c)));
+    if (selectedContact?.id === contactId) {
+        setSelectedContact(updatedContact);
+    }
+  }, [contacts, selectedContact]);
   
   const handleSyncGmail = useCallback(async (contact: Contact) => {
     if (!googleAuthState.isAuthenticated || !googleAuthState.profile?.email) {
@@ -121,7 +132,6 @@ const App: React.FC = () => {
                 notes: note,
                 outcome: 'Synced from Gmail',
             });
-            // Check if the email is a reply from the contact
             if (email.from && email.from.toLowerCase().includes(contact.email.toLowerCase()) && !email.from.toLowerCase().includes(myEmail.toLowerCase())) {
                 hasReply = true;
             }
@@ -129,69 +139,65 @@ const App: React.FC = () => {
     });
     
     if (newInteractions.length > 0) {
-       setContacts(prev => prev.map(c => {
-          if (c.id === contact.id) {
-            let updatedContact: Contact = {
-              ...c,
-              interactions: [...newInteractions, ...c.interactions],
-              lastContacted: newInteractions[0].date,
-            };
-            // Automation: If a reply is detected and stage is 'Contacted', move to 'Responded'
-            if (hasReply && updatedContact.pipelineStage === 'Contacted') {
-                updatedContact.pipelineStage = 'Responded';
-            }
-            if(selectedContact?.id === contact.id) {
-              setSelectedContact(updatedContact);
-            }
-            return updatedContact;
-          }
-          return c;
-       }));
+       let updatedContactData: Partial<Contact> = {
+          interactions: [...newInteractions, ...contact.interactions],
+          lastContacted: newInteractions[0].date,
+        };
+        if (hasReply && contact.pipelineStage === 'Contacted') {
+            updatedContactData.pipelineStage = 'Responded';
+        }
+
+        const updatedContact = await db.updateContact({ ...contact, ...updatedContactData });
+
+       setContacts(prev => prev.map(c => c.id === contact.id ? updatedContact : c));
+       if(selectedContact?.id === contact.id) {
+         setSelectedContact(updatedContact);
+       }
     } else {
         alert("No new emails found for this contact.");
     }
-  }, [googleAuthState, selectedContact]);
+  }, [googleAuthState, selectedContact, contacts]);
 
-  const handleDragEnd = useCallback((contactId: string, newStage: string) => {
-    setContacts(prev => prev.map(c => {
-      if (c.id === contactId) {
-        let updatedContact: Contact = { ...c, pipelineStage: newStage };
-        if (newStage === 'Closed - Success' && !updatedContact.partnershipType) {
-            setSelectedContact(updatedContact);
-        }
-        if (newStage !== 'Closed - Success' && updatedContact.partnershipType) {
-            updatedContact.partnershipType = undefined;
-            updatedContact.partnerDetails = undefined;
-        }
-        return updatedContact;
-      }
-      return c;
-    }));
-  }, []);
+  const handleDragEnd = useCallback(async (contactId: string, newStage: string) => {
+    const contactToUpdate = contacts.find(c => c.id === contactId);
+    if (!contactToUpdate || contactToUpdate.pipelineStage === newStage) return;
+
+    let updatedContactData: Contact = { ...contactToUpdate, pipelineStage: newStage };
+    if (newStage === 'Closed - Success' && !updatedContactData.partnershipType) {
+        setSelectedContact(updatedContactData); // Open modal to classify deal
+    }
+    if (newStage !== 'Closed - Success' && updatedContactData.partnershipType) {
+        updatedContactData.partnershipType = undefined;
+        updatedContactData.partnerDetails = undefined;
+    }
+    
+    const savedContact = await db.updateContact(updatedContactData);
+    setContacts(prev => prev.map(c => (c.id === contactId ? savedContact : c)));
+  }, [contacts]);
   
-  const handleCreateContact = useCallback((newContactData: Omit<Contact, 'id'>) => {
-    const newContact: Contact = {
-        ...newContactData,
-        id: `manual-${Date.now()}`
-    };
+  const handleCreateContact = useCallback(async (newContactData: Omit<Contact, 'id'>) => {
+    const newContact = await db.createContact(newContactData);
     setContacts(prev => [newContact, ...prev]);
   }, []);
 
-  const handleDeleteContact = useCallback((contactId: string) => {
+  const handleDeleteContact = useCallback(async (contactId: string) => {
+    await db.deleteContact(contactId);
     setContacts(prev => prev.filter(c => c.id !== contactId));
     setSelectedContact(null);
   }, []);
 
-  const handleTaskUpdate = useCallback((updatedTask: Task) => {
-    setTasks(prev => prev.map(t => t.id === updatedTask.id ? updatedTask : t));
+  const handleTaskUpdate = useCallback(async (updatedTask: Task) => {
+    const savedTask = await db.updateTask(updatedTask);
+    setTasks(prev => prev.map(t => t.id === savedTask.id ? savedTask : t));
   }, []);
 
-  const handleTaskAdd = useCallback((newTask: Omit<Task, 'id'>) => {
-    const taskWithId: Task = { ...newTask, id: `task-${Date.now()}`};
-    setTasks(prev => [taskWithId, ...prev]);
+  const handleTaskAdd = useCallback(async (newTask: Omit<Task, 'id'>) => {
+    const savedTask = await db.createTask(newTask);
+    setTasks(prev => [savedTask, ...prev]);
   }, []);
 
-  const handleTaskDelete = useCallback((taskId: string) => {
+  const handleTaskDelete = useCallback(async (taskId: string) => {
+    await db.deleteTask(taskId);
     setTasks(prev => prev.filter(t => t.id !== taskId));
   }, []);
 
@@ -201,6 +207,7 @@ const App: React.FC = () => {
   };
   
   const handleExport = useCallback(() => {
+    // This function still works as it reads from local state
     const escapeCsvCell = (cellData: any) => {
       if (cellData === undefined || cellData === null) return '';
       let cell = String(cellData);
@@ -209,47 +216,8 @@ const App: React.FC = () => {
       }
       return cell;
     };
-
-    const headers = [
-      'id', 'name', 'email', 'phone', 'instagramHandle', 'followers', 'following',
-      'posts', 'location', 'pipelineStage', 'lastContacted', 'website',
-      'biography', 'notes', 'tags', 'dealType', 'contractSigned', 'continueFollowUp',
-      'drillsAgreed', 'drillsDelivered', 'testimonialAgreed', 'testimonialDelivered',
-      'websiteLinkAgreed', 'websiteLinkDelivered', 'socialPostAgreed', 'socialPostDelivered'
-    ];
-
-    const csvContent = [
-      headers.join(','),
-      ...contacts.map(c => [
-        escapeCsvCell(c.id),
-        escapeCsvCell(c.name),
-        escapeCsvCell(c.email),
-        escapeCsvCell(c.phone),
-        escapeCsvCell(c.instagramHandle),
-        escapeCsvCell(c.followers),
-        escapeCsvCell(c.following),
-        escapeCsvCell(c.posts),
-        escapeCsvCell(c.location),
-        escapeCsvCell(c.pipelineStage),
-        escapeCsvCell(c.lastContacted),
-        escapeCsvCell(c.website),
-        escapeCsvCell(c.biography),
-        escapeCsvCell(c.notes),
-        escapeCsvCell(c.tags?.join(';')),
-        escapeCsvCell(c.partnershipType),
-        escapeCsvCell(c.partnerDetails?.contractSigned),
-        escapeCsvCell(c.partnerDetails?.continueFollowUp),
-        escapeCsvCell(c.partnerDetails?.drillVideosAgreed),
-        escapeCsvCell(c.partnerDetails?.drillVideosDelivered),
-        escapeCsvCell(c.partnerDetails?.testimonialVideoAgreed),
-        escapeCsvCell(c.partnerDetails?.testimonialVideoDelivered),
-        escapeCsvCell(c.partnerDetails?.websiteLinkAgreed),
-        escapeCsvCell(c.partnerDetails?.websiteLinkDelivered),
-        escapeCsvCell(c.partnerDetails?.socialPostAgreed),
-        escapeCsvCell(c.partnerDetails?.socialPostDelivered),
-      ].join(','))
-    ].join('\n');
-
+    const headers = ['id', 'name', 'email', 'phone', 'instagramHandle', 'followers', 'following', 'posts', 'location', 'pipelineStage', 'lastContacted', 'website', 'biography', 'notes', 'tags', 'dealType', 'contractSigned', 'continueFollowUp', 'drillsAgreed', 'drillsDelivered', 'testimonialAgreed', 'testimonialDelivered', 'websiteLinkAgreed', 'websiteLinkDelivered', 'socialPostAgreed', 'socialPostDelivered'];
+    const csvContent = [ headers.join(','), ...contacts.map(c => [ escapeCsvCell(c.id), escapeCsvCell(c.name), escapeCsvCell(c.email), escapeCsvCell(c.phone), escapeCsvCell(c.instagramHandle), escapeCsvCell(c.followers), escapeCsvCell(c.following), escapeCsvCell(c.posts), escapeCsvCell(c.location), escapeCsvCell(c.pipelineStage), escapeCsvCell(c.lastContacted), escapeCsvCell(c.website), escapeCsvCell(c.biography), escapeCsvCell(c.notes), escapeCsvCell(c.tags?.join(';')), escapeCsvCell(c.partnershipType), escapeCsvCell(c.partnerDetails?.contractSigned), escapeCsvCell(c.partnerDetails?.continueFollowUp), escapeCsvCell(c.partnerDetails?.drillVideosAgreed), escapeCsvCell(c.partnerDetails?.drillVideosDelivered), escapeCsvCell(c.partnerDetails?.testimonialVideoAgreed), escapeCsvCell(c.partnerDetails?.testimonialVideoDelivered), escapeCsvCell(c.partnerDetails?.websiteLinkAgreed), escapeCsvCell(c.partnerDetails?.websiteLinkDelivered), escapeCsvCell(c.partnerDetails?.socialPostAgreed), escapeCsvCell(c.partnerDetails?.socialPostDelivered), ].join(',')) ].join('\n');
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement('a');
     const url = URL.createObjectURL(blob);
@@ -260,6 +228,22 @@ const App: React.FC = () => {
     document.body.removeChild(link);
   }, [contacts]);
   
+  const handleImport = async (newContacts: Contact[], updatedContacts: Contact[]) => {
+      const created = await db.bulkCreateContacts(newContacts);
+      const updated = await db.bulkUpdateContacts(updatedContacts.map(c => c.id), updatedContacts);
+      
+      const updatedMap = new Map(updated.map(u => [u.id, u]));
+
+      setContacts(prev => {
+          const prevMap = new Map(prev.map(p => [p.id, p]));
+          for (const u of updated) {
+              prevMap.set(u.id, u);
+          }
+          return [...created, ...Array.from(prevMap.values())];
+      });
+      setImportModalOpen(false);
+  };
+
   const contactsToFollowUp = useMemo(() => {
     const today = new Date(); today.setHours(0,0,0,0);
     return contacts.filter(c => {
@@ -276,13 +260,20 @@ const App: React.FC = () => {
   const partnersToFollowUp = useMemo(() => contacts.filter(c => c.partnershipType === PartnershipType.PARTNER && c.partnerDetails?.continueFollowUp), [contacts]);
 
   const renderView = () => {
+    if (isLoading) {
+      return (
+        <div className="flex justify-center items-center h-[calc(100vh-10rem)]">
+          <div className="animate-spin rounded-full h-16 w-16 border-t-2 border-b-2 border-highlight"></div>
+        </div>
+      );
+    }
     switch (view) {
       case 'dashboard': return <Dashboard contacts={contacts} onSelectContact={setSelectedContact} contactsToFollowUp={contactsToFollowUp} partnersToFollowUp={partnersToFollowUp} onNavigate={handleNavigate} tasks={tasks} settings={settings} />;
       case 'kanban': return <KanbanBoard contacts={contacts} pipelineStages={settings.pipelineStages} onDragEnd={handleDragEnd} onSelectContact={setSelectedContact} />;
       case 'table': return <TableView contacts={contacts} onSelectContact={setSelectedContact} activeFilter={tableFilter} onClearFilter={() => setTableFilter(null)} onBulkUpdate={handleBulkUpdate} pipelineStages={settings.pipelineStages} />;
       case 'analytics': return <Analytics contacts={contacts} pipelineStages={settings.pipelineStages} />;
       case 'tasks': return <TasksView tasks={tasks} contacts={contacts} onUpdateTask={handleTaskUpdate} onAddTask={handleTaskAdd} onDeleteTask={handleTaskDelete} onSelectContact={setSelectedContact} />;
-      case 'settings': return <Settings settings={settings} onSettingsChange={setSettings} googleAuthState={googleAuthState} onGoogleSignIn={signIn} onGoogleSignOut={signOut} />;
+      case 'settings': return <Settings settings={settings} onSettingsChange={handleSettingsUpdate} googleAuthState={googleAuthState} onGoogleSignIn={signIn} onGoogleSignOut={signOut} />;
       default: return <Dashboard contacts={contacts} onSelectContact={setSelectedContact} contactsToFollowUp={contactsToFollowUp} partnersToFollowUp={partnersToFollowUp} onNavigate={handleNavigate} tasks={tasks} settings={settings} />;
     }
   };
@@ -294,10 +285,33 @@ const App: React.FC = () => {
         {renderView()}
       </main>
       {selectedContact && <ContactModal contact={selectedContact} onClose={() => setSelectedContact(null)} onUpdate={handleContactUpdate} onAddInteraction={handleAddInteraction} onSyncGmail={handleSyncGmail} isGmailConnected={googleAuthState.isAuthenticated} settings={settings} tasks={tasks.filter(t => t.contactId === selectedContact.id)} onTaskAdd={handleTaskAdd} onTaskUpdate={handleTaskUpdate} onTaskDelete={handleTaskDelete} onDelete={handleDeleteContact} />}
-      {isImportModalOpen && <ImportModal onClose={() => setImportModalOpen(false)} existingContacts={contacts} onImport={(newContacts, updatedContacts) => { setContacts(prev => { const updatedMap = new Map(updatedContacts.map(c => [c.id, c])); const unchanged = prev.filter(c => !updatedMap.has(c.id)); return [...newContacts, ...updatedContacts, ...unchanged]; }); setImportModalOpen(false); }} />}
+      {isImportModalOpen && <ImportModal onClose={() => setImportModalOpen(false)} existingContacts={contacts} onImport={handleImport} />}
       {isNewContactModalOpen && <NewContactModal onClose={() => setNewContactModalOpen(false)} onCreateContact={(data) => { handleCreateContact(data); setNewContactModalOpen(false); }} pipelineStages={settings.pipelineStages}/>}
     </div>
   );
 };
+
+const App: React.FC = () => {
+  const [session, setSession] = useState<Session | null>(null);
+
+  useEffect(() => {
+    // FIX: supabase.auth.getSession() is from supabase-js v2. Use v1 equivalent.
+    setSession(supabase.auth.session());
+
+    // FIX: supabase.auth.onAuthStateChange() returns { data: { subscription } } in v2, but { data } which is the subscription in v1.
+    const { data: subscription } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session)
+    })
+
+    return () => subscription.unsubscribe()
+  }, [])
+
+  if (!session) {
+    return <Auth />
+  }
+  else {
+    return <CrmApp session={session} />
+  }
+}
 
 export default App;
