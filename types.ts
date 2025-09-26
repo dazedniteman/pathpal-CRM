@@ -83,11 +83,18 @@ export interface TableFilter {
   label: string;
 }
 
+export interface KanbanView {
+  id: string;
+  name: string;
+  stages: string[];
+}
+
 export interface AppSettings {
   productContext: string;
   defaultFollowUpDays: number;
   googleClientId?: string;
   pipelineStages: string[];
+  kanbanViews?: KanbanView[];
 }
 
 export interface GoogleAuthState {

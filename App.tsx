@@ -29,6 +29,7 @@ const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
     defaultFollowUpDays: 30,
     googleClientId: '',
     pipelineStages: DEFAULT_PIPELINE_STAGES,
+    kanbanViews: [],
   });
 
   const [isLoading, setIsLoading] = useState(true);
@@ -50,7 +51,10 @@ const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
       setContacts(fetchedContacts);
       setTasks(fetchedTasks);
       if (fetchedSettings) {
-        setSettings(fetchedSettings);
+        setSettings({
+            ...fetchedSettings,
+            kanbanViews: fetchedSettings.kanbanViews || [],
+        });
       } else {
         // If no settings exist for the user, create default ones
         const defaultSettings = {
@@ -58,6 +62,23 @@ const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
           defaultFollowUpDays: 30,
           googleClientId: '',
           pipelineStages: DEFAULT_PIPELINE_STAGES,
+          kanbanViews: [
+            {
+              id: `view-${Date.now()}-1`,
+              name: 'Initial Outreach',
+              stages: ['To Reach Out', 'Contacted'],
+            },
+            {
+              id: `view-${Date.now()}-2`,
+              name: 'Engaged',
+              stages: ['Responded', 'Meeting Booked', 'On Hold'],
+            },
+            {
+              id: `view-${Date.now()}-3`,
+              name: 'Closed',
+              stages: ['Closed - Success', 'Closed - Unsuccessful'],
+            }
+          ],
         };
         await db.saveSettings(defaultSettings);
         setSettings(defaultSettings);
@@ -218,52 +239,57 @@ const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
     const escapeCsvCell = (cellData: any) => {
       if (cellData === undefined || cellData === null) return '';
       let cell = String(cellData);
-      if (cell.includes(',')) {
+      if (cell.includes(',') || cell.includes('\n') || cell.includes('"')) {
         cell = `"${cell.replace(/"/g, '""')}"`;
       }
       return cell;
     };
-    const headers = ['id', 'name', 'email', 'phone', 'instagramHandle', 'followers', 'following', 'posts', 'location', 'pipelineStage', 'lastContacted', 'website', 'biography', 'notes', 'communicationHistory', 'tags', 'dealType', 'contractSigned', 'continueFollowUp', 'drillsAgreed', 'drillsDelivered', 'testimonialAgreed', 'testimonialDelivered', 'websiteLinkAgreed', 'websiteLinkDelivered', 'socialPostAgreed', 'socialPostDelivered'];
-    
-    const csvContent = [
-        headers.join(','), 
-        ...contacts.map(c => {
-            const communicationHistory = c.interactions
-                .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
-                .map(i => `[${new Date(i.date).toLocaleString()} - ${i.type}] ${i.notes.replace(/\r\n|\n/g, ' ')}`)
-                .join(' | ');
 
-            return [ 
-                escapeCsvCell(c.id), 
-                escapeCsvCell(c.name), 
-                escapeCsvCell(c.email), 
-                escapeCsvCell(c.phone), 
-                escapeCsvCell(c.instagramHandle), 
-                escapeCsvCell(c.followers), 
-                escapeCsvCell(c.following), 
-                escapeCsvCell(c.posts), 
-                escapeCsvCell(c.location), 
-                escapeCsvCell(c.pipelineStage), 
-                escapeCsvCell(c.lastContacted), 
-                escapeCsvCell(c.website), 
-                escapeCsvCell(c.biography), 
-                escapeCsvCell(c.notes),
-                escapeCsvCell(communicationHistory), 
-                escapeCsvCell(c.tags?.join(';')), 
-                escapeCsvCell(c.partnershipType), 
-                escapeCsvCell(c.partnerDetails?.contractSigned), 
-                escapeCsvCell(c.partnerDetails?.continueFollowUp), 
-                escapeCsvCell(c.partnerDetails?.drillVideosAgreed), 
-                escapeCsvCell(c.partnerDetails?.drillVideosDelivered), 
-                escapeCsvCell(c.partnerDetails?.testimonialVideoAgreed), 
-                escapeCsvCell(c.partnerDetails?.testimonialVideoDelivered), 
-                escapeCsvCell(c.partnerDetails?.websiteLinkAgreed), 
-                escapeCsvCell(c.partnerDetails?.websiteLinkDelivered), 
-                escapeCsvCell(c.partnerDetails?.socialPostAgreed), 
-                escapeCsvCell(c.partnerDetails?.socialPostDelivered), 
-            ].join(',');
-        }) 
-    ].join('\n');
+    const headers = ['id', 'name', 'email', 'phone', 'instagramHandle', 'followers', 'following', 'posts', 'location', 'pipelineStage', 'lastContacted', 'website', 'biography', 'notes', 'tags', 'partnershipType', 'contractSigned', 'continueFollowUp', 'drillVideosAgreed', 'drillVideosDelivered', 'testimonialVideoAgreed', 'testimonialVideoDelivered', 'websiteLinkAgreed', 'websiteLinkDelivered', 'socialPostAgreed', 'socialPostDelivered', 'communicationHistory'];
+    
+    const csvRows = contacts.flatMap(c => {
+        const baseRow = [ 
+            escapeCsvCell(c.id), 
+            escapeCsvCell(c.name), 
+            escapeCsvCell(c.email), 
+            escapeCsvCell(c.phone), 
+            escapeCsvCell(c.instagramHandle), 
+            escapeCsvCell(c.followers), 
+            escapeCsvCell(c.following), 
+            escapeCsvCell(c.posts), 
+            escapeCsvCell(c.location), 
+            escapeCsvCell(c.pipelineStage), 
+            escapeCsvCell(c.lastContacted), 
+            escapeCsvCell(c.website), 
+            escapeCsvCell(c.biography), 
+            escapeCsvCell(c.notes),
+            escapeCsvCell(c.tags?.join(';')), 
+            escapeCsvCell(c.partnershipType), 
+            escapeCsvCell(c.partnerDetails?.contractSigned), 
+            escapeCsvCell(c.partnerDetails?.continueFollowUp), 
+            escapeCsvCell(c.partnerDetails?.drillVideosAgreed), 
+            escapeCsvCell(c.partnerDetails?.drillVideosDelivered), 
+            escapeCsvCell(c.partnerDetails?.testimonialVideoAgreed), 
+            escapeCsvCell(c.partnerDetails?.testimonialVideoDelivered), 
+            escapeCsvCell(c.partnerDetails?.websiteLinkAgreed), 
+            escapeCsvCell(c.partnerDetails?.websiteLinkDelivered), 
+            escapeCsvCell(c.partnerDetails?.socialPostAgreed), 
+            escapeCsvCell(c.partnerDetails?.socialPostDelivered), 
+        ];
+
+        const sortedInteractions = c.interactions.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+        
+        if (sortedInteractions.length === 0) {
+            return [[...baseRow, ''].join(',')];
+        }
+
+        return sortedInteractions.map(interaction => {
+            const communicationEntry = `[${new Date(interaction.date).toLocaleString()} - ${interaction.type}] ${interaction.notes}`;
+            return [...baseRow, escapeCsvCell(communicationEntry)].join(',');
+        });
+    });
+
+    const csvContent = [headers.join(','), ...csvRows].join('\n');
     
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement('a');
@@ -316,7 +342,7 @@ const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
     }
     switch (view) {
       case 'dashboard': return <Dashboard contacts={contacts} onSelectContact={setSelectedContact} contactsToFollowUp={contactsToFollowUp} partnersToFollowUp={partnersToFollowUp} onNavigate={handleNavigate} tasks={tasks} settings={settings} />;
-      case 'kanban': return <KanbanBoard contacts={contacts} pipelineStages={settings.pipelineStages} onDragEnd={handleDragEnd} onSelectContact={setSelectedContact} />;
+      case 'kanban': return <KanbanBoard contacts={contacts} pipelineStages={settings.pipelineStages} onDragEnd={handleDragEnd} onSelectContact={setSelectedContact} kanbanViews={settings.kanbanViews || []} />;
       case 'table': return <TableView contacts={contacts} onSelectContact={setSelectedContact} activeFilter={tableFilter} onClearFilter={() => setTableFilter(null)} onBulkUpdate={handleBulkUpdate} pipelineStages={settings.pipelineStages} />;
       case 'analytics': return <Analytics contacts={contacts} pipelineStages={settings.pipelineStages} />;
       case 'tasks': return <TasksView tasks={tasks} contacts={contacts} onUpdateTask={handleTaskUpdate} onAddTask={handleTaskAdd} onDeleteTask={handleTaskDelete} onSelectContact={setSelectedContact} />;

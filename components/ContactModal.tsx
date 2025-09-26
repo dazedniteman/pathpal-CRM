@@ -3,7 +3,7 @@
 import React, { useState, useEffect } from 'react';
 import { Contact, Interaction, InteractionType, AppSettings, PartnershipType, PartnerDetails, Task } from '../types';
 import { getFollowUpSuggestion } from '../services/geminiService';
-import { AtSymbolIcon, CalendarIcon, CloseIcon, LinkIcon, LocationMarkerIcon, PencilAltIcon, PhoneIcon, RefreshIcon, SparklesIcon, UsersIcon, TagIcon, PlusIcon, TrashIcon, CheckCircleIcon } from './icons';
+import { AtSymbolIcon, CalendarIcon, CloseIcon, LinkIcon, LocationMarkerIcon, PencilAltIcon, PhoneIcon, RefreshIcon, SparklesIcon, UsersIcon, TagIcon, PlusIcon, TrashIcon, CheckCircleIcon, XCircleIcon } from './icons';
 
 interface ContactModalProps {
   contact: Contact;
@@ -38,19 +38,17 @@ export const ContactModal: React.FC<ContactModalProps> = ({ contact, onClose, on
   const [newTaskDueDate, setNewTaskDueDate] = useState('');
   const [isDirty, setIsDirty] = useState(false);
 
-  useEffect(() => { setEditableContact(contact); setIsEditingDealType(false); }, [contact]);
-  
-  useEffect(() => {
-    // This effect runs when the contact prop changes, to set the initial tab.
-    if (contact.partnershipType === PartnershipType.PARTNER) {
-      setActiveTab('partnership');
-    } else if (activeTab === 'partnership') {
-      // If the current tab is 'partnership' (from a previous contact) and the new contact is not a partner, switch away.
-      setActiveTab('interactions');
-    }
-    // This effect should only run when the contact itself changes, not when the user navigates tabs.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [contact.id, contact.partnershipType]);
+  useEffect(() => { 
+      setEditableContact(contact); 
+      setIsEditingDealType(false); 
+      
+      // Set the default tab when a new contact is opened
+      if (contact.partnershipType === PartnershipType.PARTNER) {
+        setActiveTab('partnership');
+      } else {
+        setActiveTab('interactions');
+      }
+  }, [contact]);
 
   useEffect(() => { setIsDirty(JSON.stringify(contact) !== JSON.stringify(editableContact)); }, [contact, editableContact]);
 

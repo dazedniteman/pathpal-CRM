@@ -1,6 +1,6 @@
 
 import React, { useState } from 'react';
-import { Contact } from '../types';
+import { Contact, KanbanView } from '../types';
 import { ContactCard } from './ContactCard';
 
 interface KanbanBoardProps {
@@ -8,10 +8,12 @@ interface KanbanBoardProps {
   pipelineStages: string[];
   onDragEnd: (contactId: string, newStage: string) => void;
   onSelectContact: (contact: Contact) => void;
+  kanbanViews: KanbanView[];
 }
 
-export const KanbanBoard: React.FC<KanbanBoardProps> = ({ contacts, pipelineStages, onDragEnd, onSelectContact }) => {
+export const KanbanBoard: React.FC<KanbanBoardProps> = ({ contacts, pipelineStages, onDragEnd, onSelectContact, kanbanViews }) => {
   const [draggedContactId, setDraggedContactId] = useState<string | null>(null);
+  const [activeViewId, setActiveViewId] = useState<string>('all');
 
   const handleDragStart = (e: React.DragEvent<HTMLDivElement>, contactId: string) => {
     setDraggedContactId(contactId);
@@ -31,11 +33,42 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({ contacts, pipelineStag
     }
   };
 
+  const stagesToShow = activeViewId === 'all'
+    ? pipelineStages
+    : kanbanViews.find(v => v.id === activeViewId)?.stages || pipelineStages;
+
   return (
     <div>
-      <h2 className="text-3xl font-bold text-white mb-6">Sales Pipeline</h2>
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between mb-6 gap-4">
+        <h2 className="text-3xl font-bold text-white">Sales Pipeline</h2>
+        <div className="flex items-center space-x-1 sm:space-x-2 bg-secondary p-1 rounded-lg self-start">
+          <button
+            onClick={() => setActiveViewId('all')}
+            className={`px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
+              activeViewId === 'all'
+                ? 'bg-highlight text-white'
+                : 'text-text-secondary hover:bg-accent hover:text-white'
+            }`}
+          >
+            All
+          </button>
+          {kanbanViews.map(view => (
+            <button
+              key={view.id}
+              onClick={() => setActiveViewId(view.id)}
+              className={`px-3 py-1.5 text-sm font-medium rounded-md transition-colors whitespace-nowrap ${
+                activeViewId === view.id
+                  ? 'bg-highlight text-white'
+                  : 'text-text-secondary hover:bg-accent hover:text-white'
+              }`}
+            >
+              {view.name}
+            </button>
+          ))}
+        </div>
+      </div>
       <div className="flex space-x-4 overflow-x-auto pb-4">
-        {pipelineStages.map((stage) => (
+        {stagesToShow.map((stage) => (
           <div
             key={stage}
             className="bg-secondary rounded-lg w-80 flex-shrink-0"
