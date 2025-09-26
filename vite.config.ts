@@ -8,7 +8,8 @@ import path from 'path';
 // replaced by the actual value from your Netlify environment variables.
 export default defineConfig(({ mode }) => {
   // Load all environment variables from the current environment (e.g., Netlify build)
-  const env = loadEnv(mode, process.cwd(), '');
+  // FIX: Replaced `process.cwd()` with `'.'` to avoid a TypeScript error where Node.js types might not be available.
+  const env = loadEnv(mode, '.', '');
 
   return {
     define: {
@@ -22,7 +23,8 @@ export default defineConfig(({ mode }) => {
     plugins: [react()],
     resolve: {
       alias: {
-        '@': path.resolve(__dirname, '.'),
+        // FIX: `__dirname` is not available in ES modules. Replaced `path.resolve(__dirname, '.')` with `path.resolve('./')` to resolve from the current working directory.
+        '@': path.resolve('./'),
       }
     },
     build: {

@@ -101,7 +101,16 @@ const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
     const updatedInteractions = [interaction, ...contactToUpdate.interactions];
     const lastContacted = interaction.date;
 
-    const updatedContact = await db.updateContact({ ...contactToUpdate, interactions: updatedInteractions, lastContacted });
+    const contactDataToUpdate: Partial<Contact> = {
+        interactions: updatedInteractions,
+        lastContacted,
+    };
+    
+    if (contactToUpdate.pipelineStage === 'To Reach Out') {
+        contactDataToUpdate.pipelineStage = 'Contacted';
+    }
+
+    const updatedContact = await db.updateContact({ ...contactToUpdate, ...contactDataToUpdate });
     
     setContacts(prev => prev.map(c => (c.id === contactId ? updatedContact : c)));
     if (selectedContact?.id === contactId) {
@@ -206,7 +215,6 @@ const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
   };
   
   const handleExport = useCallback(() => {
-    // This function still works as it reads from local state
     const escapeCsvCell = (cellData: any) => {
       if (cellData === undefined || cellData === null) return '';
       let cell = String(cellData);
@@ -215,8 +223,48 @@ const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
       }
       return cell;
     };
-    const headers = ['id', 'name', 'email', 'phone', 'instagramHandle', 'followers', 'following', 'posts', 'location', 'pipelineStage', 'lastContacted', 'website', 'biography', 'notes', 'tags', 'dealType', 'contractSigned', 'continueFollowUp', 'drillsAgreed', 'drillsDelivered', 'testimonialAgreed', 'testimonialDelivered', 'websiteLinkAgreed', 'websiteLinkDelivered', 'socialPostAgreed', 'socialPostDelivered'];
-    const csvContent = [ headers.join(','), ...contacts.map(c => [ escapeCsvCell(c.id), escapeCsvCell(c.name), escapeCsvCell(c.email), escapeCsvCell(c.phone), escapeCsvCell(c.instagramHandle), escapeCsvCell(c.followers), escapeCsvCell(c.following), escapeCsvCell(c.posts), escapeCsvCell(c.location), escapeCsvCell(c.pipelineStage), escapeCsvCell(c.lastContacted), escapeCsvCell(c.website), escapeCsvCell(c.biography), escapeCsvCell(c.notes), escapeCsvCell(c.tags?.join(';')), escapeCsvCell(c.partnershipType), escapeCsvCell(c.partnerDetails?.contractSigned), escapeCsvCell(c.partnerDetails?.continueFollowUp), escapeCsvCell(c.partnerDetails?.drillVideosAgreed), escapeCsvCell(c.partnerDetails?.drillVideosDelivered), escapeCsvCell(c.partnerDetails?.testimonialVideoAgreed), escapeCsvCell(c.partnerDetails?.testimonialVideoDelivered), escapeCsvCell(c.partnerDetails?.websiteLinkAgreed), escapeCsvCell(c.partnerDetails?.websiteLinkDelivered), escapeCsvCell(c.partnerDetails?.socialPostAgreed), escapeCsvCell(c.partnerDetails?.socialPostDelivered), ].join(',')) ].join('\n');
+    const headers = ['id', 'name', 'email', 'phone', 'instagramHandle', 'followers', 'following', 'posts', 'location', 'pipelineStage', 'lastContacted', 'website', 'biography', 'notes', 'communicationHistory', 'tags', 'dealType', 'contractSigned', 'continueFollowUp', 'drillsAgreed', 'drillsDelivered', 'testimonialAgreed', 'testimonialDelivered', 'websiteLinkAgreed', 'websiteLinkDelivered', 'socialPostAgreed', 'socialPostDelivered'];
+    
+    const csvContent = [
+        headers.join(','), 
+        ...contacts.map(c => {
+            const communicationHistory = c.interactions
+                .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+                .map(i => `[${new Date(i.date).toLocaleString()} - ${i.type}] ${i.notes.replace(/\r\n|\n/g, ' ')}`)
+                .join(' | ');
+
+            return [ 
+                escapeCsvCell(c.id), 
+                escapeCsvCell(c.name), 
+                escapeCsvCell(c.email), 
+                escapeCsvCell(c.phone), 
+                escapeCsvCell(c.instagramHandle), 
+                escapeCsvCell(c.followers), 
+                escapeCsvCell(c.following), 
+                escapeCsvCell(c.posts), 
+                escapeCsvCell(c.location), 
+                escapeCsvCell(c.pipelineStage), 
+                escapeCsvCell(c.lastContacted), 
+                escapeCsvCell(c.website), 
+                escapeCsvCell(c.biography), 
+                escapeCsvCell(c.notes),
+                escapeCsvCell(communicationHistory), 
+                escapeCsvCell(c.tags?.join(';')), 
+                escapeCsvCell(c.partnershipType), 
+                escapeCsvCell(c.partnerDetails?.contractSigned), 
+                escapeCsvCell(c.partnerDetails?.continueFollowUp), 
+                escapeCsvCell(c.partnerDetails?.drillVideosAgreed), 
+                escapeCsvCell(c.partnerDetails?.drillVideosDelivered), 
+                escapeCsvCell(c.partnerDetails?.testimonialVideoAgreed), 
+                escapeCsvCell(c.partnerDetails?.testimonialVideoDelivered), 
+                escapeCsvCell(c.partnerDetails?.websiteLinkAgreed), 
+                escapeCsvCell(c.partnerDetails?.websiteLinkDelivered), 
+                escapeCsvCell(c.partnerDetails?.socialPostAgreed), 
+                escapeCsvCell(c.partnerDetails?.socialPostDelivered), 
+            ].join(',');
+        }) 
+    ].join('\n');
+    
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement('a');
     const url = URL.createObjectURL(blob);

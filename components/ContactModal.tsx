@@ -39,7 +39,19 @@ export const ContactModal: React.FC<ContactModalProps> = ({ contact, onClose, on
   const [isDirty, setIsDirty] = useState(false);
 
   useEffect(() => { setEditableContact(contact); setIsEditingDealType(false); }, [contact]);
-  useEffect(() => { if (activeTab === 'partnership' && contact.partnershipType !== PartnershipType.PARTNER) { setActiveTab('interactions'); } else if (contact.partnershipType === PartnershipType.PARTNER && activeTab !== 'partnership') { setActiveTab('partnership'); } }, [contact.id, contact.partnershipType, activeTab]);
+  
+  useEffect(() => {
+    // This effect runs when the contact prop changes, to set the initial tab.
+    if (contact.partnershipType === PartnershipType.PARTNER) {
+      setActiveTab('partnership');
+    } else if (activeTab === 'partnership') {
+      // If the current tab is 'partnership' (from a previous contact) and the new contact is not a partner, switch away.
+      setActiveTab('interactions');
+    }
+    // This effect should only run when the contact itself changes, not when the user navigates tabs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [contact.id, contact.partnershipType]);
+
   useEffect(() => { setIsDirty(JSON.stringify(contact) !== JSON.stringify(editableContact)); }, [contact, editableContact]);
 
 
