@@ -2,73 +2,115 @@
 import { GoogleGenAI } from "@google/genai";
 import { Contact } from '../types';
 
-// At build time, Vite will replace `process.env.API_KEY` with the actual value
-// of the `VITE_GEMINI_API_KEY` environment variable from your Netlify settings.
 const apiKey = process.env.API_KEY;
 
 if (!apiKey) {
-    // This check helps developers diagnose a missing API key.
-    // Ensure `VITE_GEMINI_API_KEY` is set correctly in your Netlify environment variables.
     console.error("Gemini API key is not set. Please check your `VITE_GEMINI_API_KEY` environment variable.");
 }
 
-// The GoogleGenAI constructor requires a valid API key.
-// The `!` asserts that apiKey is not null/undefined, which is safe
-// if the environment variable is set. The app will throw an error if it's not.
 const ai = new GoogleGenAI({ apiKey: apiKey! });
 
-export const getFollowUpSuggestion = async (contact: Contact, productContext?: string, tags?: string[]): Promise<string> => {
+export const getFollowUpSuggestion = async (
+  contact: Contact,
+  productContext?: string,
+  tags?: string[],
+  model: string = 'gemini-3-flash-preview',
+  projectContext?: string
+): Promise<string> => {
   if (!apiKey) {
-    // Return a user-friendly error if the key is missing at runtime.
     return "Error: Gemini API key is not configured. Please ensure `VITE_GEMINI_API_KEY` is set in the deployment settings.";
   }
-  
-  const interactionHistory = contact.interactions.map(i => 
-    `- On ${new Date(i.date).toLocaleDateString()}, a ${i.type} was logged: "${i.notes}" ${i.outcome ? `Outcome: ${i.outcome}` : ''}`
-  ).join('\n');
 
-  const prompt = `
-    You are a helpful CRM assistant. Your task is to write a concise, friendly, and professional follow-up email.
-    
-    ${productContext ? `Here is some background context on the product/service being offered: ${productContext}` : ''}
+  const interactionHistory = contact.interactions
+    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+    .slice(0, 10)
+    .map(i => {
+      const sentBy = i.isSentByUser ? 'You sent' : i.isSentByUser === false ? 'They sent' : '';
+      const bodyPreview = i.emailBody ? `\n   Email content: "${i.emailBody.substring(0, 300)}..."` : '';
+      return `- ${new Date(i.date).toLocaleDateString()}: [${i.type}]${sentBy ? ' ' + sentBy + ':' : ''} "${i.notes}"${bodyPreview} ${i.outcome ? `| Outcome: ${i.outcome}` : ''}`;
+    }).join('\n');
 
-    Here is the contact's information:
-    - Name: ${contact.name}
-    - Email: ${contact.email}
-    - Biography: ${contact.biography || 'No biography provided.'}
-    - User-added Notes: ${contact.notes || 'No specific notes provided.'}
-    - Location: ${contact.location || 'Unknown'}
-    - Website: ${contact.website || 'N/A'}
-    - Instagram: ${contact.instagramHandle || 'N/A'} with ${contact.followers || 'N/A'} followers.
-    - Posts: ${contact.posts || 'N/A'}
-    - Current Pipeline Stage: ${contact.pipelineStage}
-    ${tags && tags.length > 0 ? `- Tags: ${tags.join(', ')}` : ''}
+  const prompt = `You are a helpful CRM assistant for PathPal Golf, a company that sells physical golf training aids (The PathPal and The TrueStrike).
 
-    Here is the recent communication history:
-    ${interactionHistory || "No previous interactions logged."}
+Your task is to write a concise, friendly, and professional follow-up email on behalf of Steven, the founder.
 
-    The last contact was on ${new Date(contact.lastContacted).toLocaleDateString()}.
-    The goal is to re-engage the contact, move them to the next stage of the pipeline if appropriate, and maintain a positive relationship.
+${productContext ? `PRODUCT & COMPANY CONTEXT:\n${productContext}\n` : ''}
+${projectContext ? `CURRENT PROJECT GOAL WITH THIS CONTACT:\n${projectContext}\n` : ''}
 
-    Based on all this information, please generate a subject line and a short follow-up email body. The tone should be helpful and not overly pushy. Format the output as follows:
-    Subject: [Your suggested subject line]
-    
-    [Your suggested email body]
-  `;
+CONTACT INFORMATION:
+- Name: ${contact.name}
+- Email: ${contact.email}
+- Type: ${contact.contactType || 'instructor'}
+- Biography: ${contact.biography || 'No biography provided.'}
+- Notes: ${contact.richNotes || contact.notes || 'No specific notes provided.'}
+- Location: ${contact.location || 'Unknown'}
+- Website: ${contact.website || 'N/A'}
+- Instagram: ${contact.instagramHandle || 'N/A'} with ${(contact.followers || 0).toLocaleString()} followers.
+- Current Stage: ${contact.pipelineStage}
+- Partnership Type: ${contact.partnershipType || 'Not yet a partner'}
+${tags && tags.length > 0 ? `- Tags: ${tags.join(', ')}` : ''}
+
+RECENT COMMUNICATION HISTORY (newest first):
+${interactionHistory || "No previous interactions logged."}
+
+Last contact was ${new Date(contact.lastContacted).toLocaleDateString()}.
+
+INSTRUCTIONS:
+Write a short, personal follow-up email. Keep it under 150 words for the body.
+- Do NOT use generic phrases like "I hope this email finds you well"
+- Reference specific context from the communication history when possible
+- Be direct and get to the point quickly
+- Sign as "Steven" from PathPal Golf
+- The goal: ${contact.pipelineStage === 'To Reach Out' ? 'Initial outreach, introduce myself and the product' : contact.pipelineStage === 'Contacted' ? 'Follow up on previous outreach, no response yet' : contact.pipelineStage === 'Responded' ? 'Continue the conversation and move toward a partnership' : contact.partnershipType ? 'Maintain the relationship and check in' : 'Move toward the next step'}
+
+Format your response EXACTLY as:
+Subject: [subject line]
+
+[email body]`;
 
   try {
     const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: prompt,
+      model: model,
+      contents: prompt,
     });
-    
+
     const text = response.text;
     if (!text) {
-        throw new Error("Received an empty response from Gemini API.");
+      throw new Error("Received an empty response from Gemini API.");
     }
     return text;
   } catch (error) {
     console.error("Error calling Gemini API:", error);
-    throw new Error("Failed to get suggestion from Gemini API.");
+    throw new Error("Failed to get suggestion from Gemini API. Please check your API key and try again.");
+  }
+};
+
+export const generateEmailDraft = async (
+  context: string,
+  model: string = 'gemini-3-flash-preview'
+): Promise<{ subject: string; body: string }> => {
+  if (!apiKey) {
+    return { subject: 'Follow Up', body: 'Error: API key not configured.' };
+  }
+
+  const prompt = `${context}\n\nFormat your response EXACTLY as:\nSubject: [subject line]\n\n[email body only]`;
+
+  try {
+    const response = await ai.models.generateContent({
+      model: model,
+      contents: prompt,
+    });
+
+    const text = response.text || '';
+    const lines = text.split('\n');
+    const subjectLine = lines.find((l: string) => l.toLowerCase().startsWith('subject:'));
+    const subject = subjectLine ? subjectLine.replace(/^subject:\s*/i, '').trim() : 'Follow Up';
+    const subjectIdx = lines.findIndex((l: string) => l.toLowerCase().startsWith('subject:'));
+    const body = lines.slice(subjectIdx + 2).join('\n').trim();
+
+    return { subject, body };
+  } catch (error) {
+    console.error("Error generating email draft:", error);
+    return { subject: 'Follow Up', body: 'Failed to generate email. Please try again.' };
   }
 };

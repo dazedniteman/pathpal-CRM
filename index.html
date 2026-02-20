@@ -4,24 +4,194 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Gemini CRM</title>
+    <title>PathPal CRM</title>
+    <!-- Google Fonts: Inter + JetBrains Mono -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
       tailwind.config = {
         theme: {
           extend: {
+            fontFamily: {
+              'inter': ['Inter', 'sans-serif'],
+              'mono': ['JetBrains Mono', 'monospace'],
+            },
             colors: {
-              'primary': '#1a202c',
-              'secondary': '#2d3748',
-              'accent': '#4a5568',
-              'highlight': '#3b82f6',
-              'text-primary': '#f7fafc',
-              'text-secondary': '#a0aec0',
+              // --- Legacy aliases (keep existing components working) ---
+              'primary': '#0A0B0D',
+              'secondary': '#111318',
+              'accent': '#1C1F2A',
+              'highlight': '#6366F1',
+              'text-primary': '#F0F2F5',
+              'text-secondary': '#9BA3AF',
+              // --- New base palette ---
+              base: {
+                900: '#0A0B0D',
+                800: '#111318',
+                750: '#161820',
+                700: '#1C1F2A',
+                600: '#252836',
+                500: '#353848',
+                400: '#4A4D5E',
+              },
+              text: {
+                primary: '#F0F2F5',
+                secondary: '#9BA3AF',
+                muted: '#6B7280',
+              },
+              // --- Track accent colors ---
+              outreach: {
+                DEFAULT: '#6366F1',
+                light: '#818CF8',
+                dim: '#1e1f3b',
+                glow: 'rgba(99,102,241,0.15)',
+              },
+              partner: {
+                DEFAULT: '#10B981',
+                light: '#34D399',
+                dim: '#0d2e22',
+                glow: 'rgba(16,185,129,0.15)',
+              },
+              sold: {
+                DEFAULT: '#F59E0B',
+                light: '#FCD34D',
+                dim: '#2d1f07',
+                glow: 'rgba(245,158,11,0.15)',
+              },
             },
           },
         },
       }
     </script>
+    <style>
+      /* Base font and background */
+      *, *::before, *::after { box-sizing: border-box; }
+      body {
+        font-family: 'Inter', sans-serif;
+        background: #0A0B0D;
+        color: #F0F2F5;
+        margin: 0;
+        padding: 0;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+      }
+
+      /* Track accent bars */
+      .track-accent-outreach { border-left: 3px solid #6366F1; }
+      .track-accent-partner  { border-left: 3px solid #10B981; }
+      .track-accent-sold     { border-left: 3px solid #F59E0B; }
+
+      /* Card hover lift */
+      .card-hover {
+        transition: transform 0.15s ease, box-shadow 0.15s ease;
+      }
+      .card-hover:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 8px 30px rgba(0,0,0,0.4);
+      }
+
+      /* Glassmorphism */
+      .glass {
+        background: rgba(28,31,42,0.80);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+      }
+
+      /* JetBrains Mono for data */
+      .font-mono, .data-mono {
+        font-family: 'JetBrains Mono', monospace;
+      }
+
+      /* Thin dark scrollbars */
+      ::-webkit-scrollbar { width: 6px; height: 6px; }
+      ::-webkit-scrollbar-track { background: #111318; }
+      ::-webkit-scrollbar-thumb { background: #252836; border-radius: 3px; }
+      ::-webkit-scrollbar-thumb:hover { background: #353848; }
+
+      /* Sidebar fixed */
+      .sidebar-fixed {
+        position: fixed;
+        top: 0;
+        left: 0;
+        height: 100vh;
+        width: 260px;
+        z-index: 40;
+        overflow-y: auto;
+        overflow-x: hidden;
+      }
+
+      /* Main content offset */
+      .main-content {
+        margin-left: 260px;
+        min-height: 100vh;
+      }
+
+      /* Track glow effects */
+      .glow-outreach { box-shadow: 0 0 20px rgba(99,102,241,0.12); }
+      .glow-partner  { box-shadow: 0 0 20px rgba(16,185,129,0.12); }
+      .glow-sold     { box-shadow: 0 0 20px rgba(245,158,11,0.12); }
+
+      /* Gradient text */
+      .gradient-text-outreach {
+        background: linear-gradient(135deg, #6366F1, #818CF8);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+      }
+
+      /* Smooth transitions */
+      .transition-base { transition: all 0.2s ease; }
+
+      /* Health dots */
+      .health-warm    { width: 8px; height: 8px; border-radius: 50%; background: #10B981; display: inline-block; }
+      .health-cooling { width: 8px; height: 8px; border-radius: 50%; background: #F59E0B; display: inline-block; }
+      .health-cold    { width: 8px; height: 8px; border-radius: 50%; background: #EF4444; display: inline-block; }
+
+      /* Badge */
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        padding: 2px 8px;
+        border-radius: 9999px;
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+      }
+
+      /* Tab active underline */
+      .tab-active {
+        border-bottom: 2px solid currentColor;
+      }
+
+      /* Elevated card */
+      .card-elevated {
+        background: #161820;
+        border: 1px solid #252836;
+        border-radius: 12px;
+        box-shadow: 0 4px 24px rgba(0,0,0,0.3);
+      }
+
+      /* Input base */
+      .input-base {
+        background: #111318;
+        border: 1px solid #252836;
+        border-radius: 8px;
+        color: #F0F2F5;
+        padding: 8px 12px;
+        font-size: 14px;
+        outline: none;
+        transition: border-color 0.15s ease;
+        width: 100%;
+        font-family: 'Inter', sans-serif;
+      }
+      .input-base:focus {
+        border-color: #6366F1;
+        box-shadow: 0 0 0 2px rgba(99,102,241,0.15);
+      }
+      .input-base::placeholder { color: #6B7280; }
+    </style>
     <script src="https://accounts.google.com/gsi/client" async defer></script>
   <script type="importmap">
 {
@@ -39,7 +209,7 @@
 }
 </script>
 </head>
-  <body class="bg-primary text-text-primary">
+  <body>
     <div id="root"></div>
     <script type="module" src="/index.tsx"></script>
   </body>

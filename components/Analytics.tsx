@@ -1,16 +1,17 @@
 
 import React, { useMemo } from 'react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell, Funnel, FunnelChart, LabelList } from 'recharts';
-import { Contact } from '../types';
+import { Contact, EmailTemplate } from '../types';
 
 interface AnalyticsProps {
   contacts: Contact[];
   pipelineStages: string[];
+  templates?: EmailTemplate[];
 }
 
 const COLORS = ['#3b82f6', '#10b981', '#f97316', '#ef4444', '#8b5cf6', '#ec4899', '#f59e0b', '#14b8a6'];
 
-export const Analytics: React.FC<AnalyticsProps> = ({ contacts, pipelineStages }) => {
+export const Analytics: React.FC<AnalyticsProps> = ({ contacts, pipelineStages, templates = [] }) => {
   const pipelineData = useMemo(() => {
     return pipelineStages.map(stage => ({
       name: stage,
@@ -28,6 +29,35 @@ export const Analytics: React.FC<AnalyticsProps> = ({ contacts, pipelineStages }
       { name: 'Ongoing', value: ongoing, color: '#3b82f6' },
     ];
   }, [contacts]);
+
+  // Template A/B performance
+  const templatePerformance = useMemo(() => {
+    if (templates.length === 0) return { standalone: [], abGroups: [] };
+
+    const withStats = templates.map(t => ({
+      ...t,
+      sends: t.sendCount || 0,
+      opens: t.openCount || 0,
+      openRate: t.sendCount ? Math.round(((t.openCount || 0) / t.sendCount) * 100) : null,
+    }));
+
+    // Group by variantGroup
+    const grouped = new Map<string, typeof withStats>();
+    const standalone: typeof withStats = [];
+    for (const t of withStats) {
+      if (!t.variantGroup) { standalone.push(t); continue; }
+      if (!grouped.has(t.variantGroup)) grouped.set(t.variantGroup, []);
+      grouped.get(t.variantGroup)!.push(t);
+    }
+
+    const abGroups = Array.from(grouped.entries()).map(([groupName, variants]) => {
+      const winner = variants.reduce((best, v) =>
+        (v.openRate ?? -1) > (best.openRate ?? -1) ? v : best, variants[0]);
+      return { groupName, variants, winnerId: winner.opens > 0 ? winner.id : null };
+    });
+
+    return { standalone, abGroups };
+  }, [templates]);
 
   const conversionFunnelData = useMemo(() => {
     let funnelData: { stage: string, count: number }[] = [];
@@ -116,6 +146,101 @@ export const Analytics: React.FC<AnalyticsProps> = ({ contacts, pipelineStages }
            </div>
         </div>
       </div>
+
+      {/* Template A/B Performance */}
+      {templates.length > 0 && (
+        <div className="bg-secondary p-6 rounded-lg shadow-lg">
+          <h3 className="text-xl font-semibold text-white mb-6">Template Performance</h3>
+
+          {/* A/B Groups */}
+          {templatePerformance.abGroups.length > 0 && (
+            <div className="mb-6 space-y-4">
+              <h4 className="text-sm font-semibold text-text-secondary uppercase tracking-wide">A/B Test Groups</h4>
+              {templatePerformance.abGroups.map(({ groupName, variants, winnerId }) => (
+                <div key={groupName} className="border border-base-600 rounded-lg overflow-hidden">
+                  <div className="px-4 py-2 bg-base-700 border-b border-base-600 flex items-center gap-2">
+                    <span className="text-xs font-mono text-text-muted uppercase">Group:</span>
+                    <span className="text-sm font-medium text-text-primary">{groupName}</span>
+                  </div>
+                  <div className="divide-y divide-base-600">
+                    {variants.map(v => (
+                      <div key={v.id} className={`flex items-center gap-4 px-4 py-3 ${v.id === winnerId ? 'bg-partner-dim' : ''}`}>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            <p className="text-sm font-medium text-text-primary truncate">{v.name}</p>
+                            {v.id === winnerId && (
+                              <span className="text-xs px-1.5 py-0.5 rounded bg-partner/20 text-partner-light font-medium flex-shrink-0">Winner</span>
+                            )}
+                          </div>
+                          <p className="text-xs text-text-muted truncate">{v.subject}</p>
+                        </div>
+                        <div className="flex items-center gap-6 flex-shrink-0 text-right">
+                          <div>
+                            <p className="text-sm font-mono font-semibold text-text-primary">{v.sends}</p>
+                            <p className="text-xs text-text-muted">Sent</p>
+                          </div>
+                          <div>
+                            <p className="text-sm font-mono font-semibold text-text-primary">{v.opens}</p>
+                            <p className="text-xs text-text-muted">Opened</p>
+                          </div>
+                          <div>
+                            <p className={`text-sm font-mono font-semibold ${v.openRate !== null ? (v.openRate >= 30 ? 'text-partner-light' : v.openRate >= 15 ? 'text-sold-light' : 'text-text-secondary') : 'text-text-muted'}`}>
+                              {v.openRate !== null ? `${v.openRate}%` : '—'}
+                            </p>
+                            <p className="text-xs text-text-muted">Open rate</p>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Standalone templates */}
+          {templatePerformance.standalone.length > 0 && (
+            <div className="space-y-2">
+              {templatePerformance.abGroups.length > 0 && (
+                <h4 className="text-sm font-semibold text-text-secondary uppercase tracking-wide mb-3">Individual Templates</h4>
+              )}
+              <div className="overflow-hidden rounded-lg border border-base-600">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="bg-base-700 border-b border-base-600">
+                      <th className="text-left px-4 py-2 text-xs font-semibold text-text-muted uppercase tracking-wide">Template</th>
+                      <th className="text-right px-4 py-2 text-xs font-semibold text-text-muted uppercase tracking-wide">Sent</th>
+                      <th className="text-right px-4 py-2 text-xs font-semibold text-text-muted uppercase tracking-wide">Opened</th>
+                      <th className="text-right px-4 py-2 text-xs font-semibold text-text-muted uppercase tracking-wide">Open Rate</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-base-600">
+                    {templatePerformance.standalone.map(t => (
+                      <tr key={t.id} className="hover:bg-base-700 transition-colors">
+                        <td className="px-4 py-3">
+                          <p className="text-text-primary font-medium truncate max-w-xs">{t.name}</p>
+                          <p className="text-xs text-text-muted capitalize">{t.templateType?.replace('_', ' ')}</p>
+                        </td>
+                        <td className="px-4 py-3 text-right font-mono text-text-secondary">{t.sends}</td>
+                        <td className="px-4 py-3 text-right font-mono text-text-secondary">{t.opens}</td>
+                        <td className="px-4 py-3 text-right font-mono font-semibold">
+                          <span className={t.openRate !== null ? (t.openRate >= 30 ? 'text-partner-light' : t.openRate >= 15 ? 'text-sold-light' : 'text-text-secondary') : 'text-text-muted'}>
+                            {t.openRate !== null ? `${t.openRate}%` : '—'}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {templatePerformance.standalone.length === 0 && templatePerformance.abGroups.length === 0 && (
+            <p className="text-text-muted text-sm italic">No template data yet. Start sending emails with templates to see performance here.</p>
+          )}
+        </div>
+      )}
     </div>
   );
 };

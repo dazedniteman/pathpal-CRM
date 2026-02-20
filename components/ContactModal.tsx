@@ -1,8 +1,9 @@
 
-
 import React, { useState, useEffect } from 'react';
-import { Contact, Interaction, InteractionType, AppSettings, PartnershipType, PartnerDetails, Task } from '../types';
+import { Contact, Interaction, InteractionType, AppSettings, PartnershipType, PartnerDetails, Task, EmailDraft, GmailAlias, ContactType, Product, ContactProduct, Sequence, ContactSequence, Project, ContactProject, calculateHealthScore, getHealthLevel, daysSince } from '../types';
 import { getFollowUpSuggestion } from '../services/geminiService';
+import { getSequenceProgress, getNextStep, getStepDueDate } from '../services/sequenceService';
+import { ContactTimeline } from './ContactTimeline';
 import { AtSymbolIcon, CalendarIcon, CloseIcon, LinkIcon, LocationMarkerIcon, PencilAltIcon, PhoneIcon, RefreshIcon, SparklesIcon, UsersIcon, TagIcon, PlusIcon, TrashIcon, CheckCircleIcon, XCircleIcon } from './icons';
 
 interface ContactModalProps {
@@ -18,63 +19,160 @@ interface ContactModalProps {
   onTaskUpdate: (task: Task) => void;
   onTaskDelete: (taskId: string) => void;
   onDelete: (contactId: string) => void;
+  onComposeEmail?: (draft: Partial<EmailDraft>, contact?: Contact) => void;
+  aliases?: GmailAlias[];
+  products?: Product[];
+  contactProducts?: ContactProduct[];
+  onLinkProduct?: (link: Omit<ContactProduct, 'id'>) => Promise<void>;
+  onUnlinkProduct?: (linkId: string) => Promise<void>;
+  onUpdateContactProduct?: (link: ContactProduct) => Promise<void>;
+  // Phase 3: Sequences
+  sequences?: Sequence[];
+  contactEnrollments?: ContactSequence[];
+  onEnrollContact?: (sequenceId: string) => Promise<void>;
+  onCompleteStep?: (enrollmentId: string, stepId: string, sequence: Sequence) => Promise<void>;
+  onUnenrollContact?: (enrollmentId: string) => Promise<void>;
+  // Phase 4: Projects
+  projects?: Project[];
+  contactProjects?: ContactProject[];
+  onLinkProject?: (projectId: string) => Promise<void>;
+  onUnlinkProject?: (linkId: string) => Promise<void>;
 }
 
-const DEFAULT_PARTNER_DETAILS: PartnerDetails = { contractSigned: false, continueFollowUp: false, drillVideosAgreed: 0, drillVideosDelivered: 0, drillVideoLinks: [], testimonialVideoAgreed: false, testimonialVideoDelivered: false, testimonialVideoLink: '', websiteLinkAgreed: false, websiteLinkDelivered: false, websiteLinkUrl: '', socialPostAgreed: false, socialPostDelivered: false, socialPostLink: '' };
+const DEFAULT_PARTNER_DETAILS: PartnerDetails = {
+  contractSigned: false, continueFollowUp: false,
+  drillVideosAgreed: 0, drillVideosDelivered: 0, drillVideoLinks: [],
+  testimonialVideoAgreed: false, testimonialVideoDelivered: false, testimonialVideoLink: '',
+  websiteLinkAgreed: false, websiteLinkDelivered: false, websiteLinkUrl: '',
+  socialPostAgreed: false, socialPostDelivered: false, socialPostLink: '',
+};
 
-const TabButton: React.FC<{ active: boolean; onClick: () => void; children: React.ReactNode }> = ({ active, onClick, children }) => ( <button onClick={onClick} className={`px-4 py-2 text-sm font-medium rounded-t-lg transition-colors ${ active ? 'bg-accent text-white' : 'bg-secondary text-text-secondary hover:bg-accent/50' }`}>{children}</button> );
-const DeliverableRow: React.FC<{ label: string; agreed: boolean; delivered: boolean; onAgreedChange: (value: boolean) => void; onDeliveredChange: (value: boolean) => void; isDirty: boolean; }> = ({ label, agreed, delivered, onAgreedChange, onDeliveredChange, isDirty }) => ( <div className={`flex justify-between items-center p-3 bg-accent rounded-md transition-all ${isDirty ? 'ring-2 ring-highlight' : ''}`}> <span className="font-medium text-white text-sm">{label}</span> <div className="flex items-center space-x-6"> <label className="flex items-center space-x-2 cursor-pointer text-xs"><input type="checkbox" checked={agreed} onChange={e => onAgreedChange(e.target.checked)} className="form-checkbox bg-primary text-highlight focus:ring-highlight" /><span>Agreed</span></label> <label className="flex items-center space-x-2 cursor-pointer text-xs"><input type="checkbox" checked={delivered} onChange={e => onDeliveredChange(e.target.checked)} disabled={!agreed} className="form-checkbox bg-primary text-highlight focus:ring-highlight disabled:opacity-50" /><span>Delivered</span></label> </div> </div> );
+type ActiveTab = 'timeline' | 'tasks' | 'ai' | 'partnership';
 
-export const ContactModal: React.FC<ContactModalProps> = ({ contact, onClose, onUpdate, onAddInteraction, onSyncGmail, isGmailConnected, settings, tasks, onTaskAdd, onTaskUpdate, onTaskDelete, onDelete }) => {
-  const [activeTab, setActiveTab] = useState<'interactions' | 'tasks' | 'ai' | 'partnership'>('interactions');
+const TabBtn: React.FC<{ active: boolean; onClick: () => void; children: React.ReactNode; badge?: number }> = ({ active, onClick, children, badge }) => (
+  <button
+    onClick={onClick}
+    className={`flex items-center gap-1.5 px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+      active
+        ? 'border-outreach text-outreach-light'
+        : 'border-transparent text-text-muted hover:text-text-secondary'
+    }`}
+  >
+    {children}
+    {badge !== undefined && badge > 0 && (
+      <span className={`text-xs px-1.5 py-0.5 rounded-full font-mono ${active ? 'bg-outreach-dim text-outreach-light' : 'bg-base-600 text-text-muted'}`}>
+        {badge}
+      </span>
+    )}
+  </button>
+);
+
+const DeliverableRow: React.FC<{
+  label: string; agreed: boolean; delivered: boolean;
+  onAgreedChange: (v: boolean) => void; onDeliveredChange: (v: boolean) => void;
+  dueDate?: string; onDueDateChange?: (v: string) => void;
+}> = ({ label, agreed, delivered, onAgreedChange, onDeliveredChange, dueDate, onDueDateChange }) => {
+  const isOverdue = dueDate && !delivered && new Date(dueDate) < new Date();
+  return (
+    <div className="p-3 bg-base-700 rounded-lg space-y-2">
+      <div className="flex justify-between items-center">
+        <span className="font-medium text-text-primary text-sm">{label}</span>
+        <div className="flex items-center gap-5">
+          <label className="flex items-center gap-2 cursor-pointer text-xs text-text-muted">
+            <input type="checkbox" checked={agreed} onChange={e => onAgreedChange(e.target.checked)} className="accent-partner" />
+            Agreed
+          </label>
+          <label className="flex items-center gap-2 cursor-pointer text-xs text-text-muted">
+            <input type="checkbox" checked={delivered} onChange={e => onDeliveredChange(e.target.checked)} disabled={!agreed} className="accent-partner disabled:opacity-50" />
+            Delivered
+          </label>
+        </div>
+      </div>
+      {agreed && !delivered && onDueDateChange && (
+        <div className="flex items-center gap-2">
+          <label className="text-xs text-text-muted flex-shrink-0">Due date:</label>
+          <input
+            type="date"
+            value={dueDate ? dueDate.split('T')[0] : ''}
+            onChange={e => onDueDateChange(e.target.value ? new Date(e.target.value).toISOString() : '')}
+            className={`flex-1 bg-base-600 border rounded px-2 py-1 text-xs font-mono text-text-primary outline-none focus:border-partner/50 transition-colors ${isOverdue ? 'border-red-500/50 text-red-400' : 'border-base-500'}`}
+          />
+          {isOverdue && <span className="text-xs text-red-400 flex-shrink-0">Overdue</span>}
+        </div>
+      )}
+    </div>
+  );
+};
+
+export const ContactModal: React.FC<ContactModalProps> = ({
+  contact, onClose, onUpdate, onAddInteraction, onSyncGmail,
+  isGmailConnected, settings, tasks, onTaskAdd, onTaskUpdate, onTaskDelete,
+  onDelete, onComposeEmail, aliases = [],
+  products = [], contactProducts = [], onLinkProduct, onUnlinkProduct, onUpdateContactProduct,
+  sequences = [], contactEnrollments = [], onEnrollContact, onCompleteStep, onUnenrollContact,
+  projects = [], contactProjects = [], onLinkProject, onUnlinkProject,
+}) => {
+  const [activeTab, setActiveTab] = useState<ActiveTab>('timeline');
   const [isLoadingAi, setIsLoadingAi] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [isEditingDealType, setIsEditingDealType] = useState(false);
   const [error, setError] = useState('');
-  const [newInteractionNotes, setNewInteractionNotes] = useState('');
+  const [aiSuggestion, setAiSuggestion] = useState('');
   const [editableContact, setEditableContact] = useState<Contact>(contact);
   const [tagInput, setTagInput] = useState('');
   const [newTaskTitle, setNewTaskTitle] = useState('');
   const [newTaskDueDate, setNewTaskDueDate] = useState('');
   const [isDirty, setIsDirty] = useState(false);
 
-  useEffect(() => { 
-      setEditableContact(contact); 
-      setIsEditingDealType(false); 
-      
-      // Set the default tab when a new contact is opened
-      if (contact.partnershipType === PartnershipType.PARTNER) {
-        setActiveTab('partnership');
-      } else {
-        setActiveTab('interactions');
-      }
+  useEffect(() => {
+    setEditableContact(contact);
+    setIsEditingDealType(false);
+    setActiveTab(contact.partnershipType === PartnershipType.PARTNER ? 'partnership' : 'timeline');
   }, [contact]);
 
-  useEffect(() => { setIsDirty(JSON.stringify(contact) !== JSON.stringify(editableContact)); }, [contact, editableContact]);
+  useEffect(() => {
+    setIsDirty(JSON.stringify(contact) !== JSON.stringify(editableContact));
+  }, [contact, editableContact]);
 
+  const handleUpdate = (updatedData: Partial<Contact>) => {
+    setEditableContact(prev => ({ ...prev, ...updatedData }));
+  };
 
-  const handleUpdate = (updatedData: Partial<Contact>) => { const updatedContact = { ...editableContact, ...updatedData }; setEditableContact(updatedContact); };
-  const handlePartnerDetailChange = (field: keyof PartnerDetails, value: any) => { handleUpdate({ partnerDetails: { ...(editableContact.partnerDetails || DEFAULT_PARTNER_DETAILS), [field]: value } }); };
-  const handleGenerateSuggestion = async () => { setIsLoadingAi(true); setError(''); setAiSuggestion(''); try { const s = await getFollowUpSuggestion(contact, settings.productContext, contact.tags); setAiSuggestion(s); } catch (e) { setError('Failed to generate.'); } finally { setIsLoadingAi(false); } };
-  const [aiSuggestion, setAiSuggestion] = useState('');
-  const handleAddNote = () => { if (!newInteractionNotes.trim()) return; onAddInteraction(contact.id, { id: `int-${Date.now()}`, type: InteractionType.NOTE, date: new Date().toISOString(), notes: newInteractionNotes }); setNewInteractionNotes(''); };
-  const handleGmailSync = async () => { setIsSyncing(true); await onSyncGmail(contact); setIsSyncing(false); };
+  const handlePartnerDetailChange = (field: keyof PartnerDetails, value: any) => {
+    handleUpdate({ partnerDetails: { ...(editableContact.partnerDetails || DEFAULT_PARTNER_DETAILS), [field]: value } });
+  };
 
   const handleFieldChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
     const { name, value, type } = e.target;
     let finalValue: any = value;
-    if (type === 'number') {
-        finalValue = value ? parseInt(value, 10) : undefined;
-    } else if (type === 'date') {
-        finalValue = value ? new Date(value).toISOString() : undefined;
-    }
+    if (type === 'number') finalValue = value ? parseInt(value, 10) : undefined;
+    else if (type === 'date') finalValue = value ? new Date(value).toISOString() : undefined;
     handleUpdate({ [name]: finalValue });
   };
-  
-  const igLink = contact.instagramHandle ? `https://instagram.com/${contact.instagramHandle.replace('@', '')}` : '#';
-  const classifyDeal = (type: PartnershipType) => { const update: Partial<Contact> = { partnershipType: type }; if (type === PartnershipType.PARTNER && !contact.partnerDetails) { update.partnerDetails = DEFAULT_PARTNER_DETAILS; } handleUpdate(update); setIsEditingDealType(false); };
-  const handleTagInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => { if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); const newTag = tagInput.trim(); if (newTag) { const updatedTags = Array.from(new Set([...(editableContact.tags || []), newTag])); handleUpdate({ tags: updatedTags }); } setTagInput(''); } };
-  const removeTag = (tagToRemove: string) => { const updatedTags = (editableContact.tags || []).filter(tag => tag !== tagToRemove); handleUpdate({ tags: updatedTags }); };
+
+  const classifyDeal = (type: PartnershipType) => {
+    const update: Partial<Contact> = { partnershipType: type };
+    if (type === PartnershipType.PARTNER && !contact.partnerDetails) {
+      update.partnerDetails = DEFAULT_PARTNER_DETAILS;
+    }
+    handleUpdate(update);
+    setIsEditingDealType(false);
+  };
+
+  const handleTagInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter' || e.key === ',') {
+      e.preventDefault();
+      const newTag = tagInput.trim();
+      if (newTag) {
+        handleUpdate({ tags: Array.from(new Set([...(editableContact.tags || []), newTag])) });
+      }
+      setTagInput('');
+    }
+  };
+
+  const removeTag = (tagToRemove: string) => {
+    handleUpdate({ tags: (editableContact.tags || []).filter(t => t !== tagToRemove) });
+  };
 
   const handleAddTask = () => {
     if (!newTaskTitle.trim() || !newTaskDueDate) return;
@@ -84,114 +182,786 @@ export const ContactModal: React.FC<ContactModalProps> = ({ contact, onClose, on
   };
 
   const handleDelete = () => {
-    if (window.confirm(`Are you sure you want to delete ${contact.name}? This action cannot be undone.`)) {
+    if (window.confirm(`Delete ${contact.name}? This cannot be undone.`)) {
       onDelete(contact.id);
     }
   };
 
   const handleClose = () => {
     if (isDirty) {
-      if (window.confirm("You have unsaved changes. Are you sure you want to discard them?")) {
-        onClose();
-      }
+      if (window.confirm("You have unsaved changes. Discard them?")) onClose();
     } else {
       onClose();
     }
   };
 
-  const handleSave = () => {
-    onUpdate(editableContact);
-  };
-  
-  const isFieldDirtyCheck = (fieldName: keyof Contact, isNested: boolean = false) => {
-      if (isNested) {
-          // This is a simplified check for partnerDetails
-          return JSON.stringify(editableContact.partnerDetails) !== JSON.stringify(contact.partnerDetails);
-      }
-      return editableContact[fieldName] !== contact[fieldName];
+  const handleSave = () => onUpdate(editableContact);
+
+  const handleGmailSync = async () => {
+    setIsSyncing(true);
+    await onSyncGmail(contact);
+    setIsSyncing(false);
   };
 
-  const renderTabs = () => (
-    <div className="md:col-span-2 flex flex-col">
-        <div className="border-b border-accent -mt-2">
-            <TabButton active={activeTab === 'interactions'} onClick={() => setActiveTab('interactions')}>History</TabButton>
-            <TabButton active={activeTab === 'tasks'} onClick={() => setActiveTab('tasks')}>Tasks ({tasks.length})</TabButton>
-            {editableContact.partnershipType === PartnershipType.PARTNER && <TabButton active={activeTab === 'partnership'} onClick={() => setActiveTab('partnership')}>Partnership Details</TabButton>}
-            <TabButton active={activeTab === 'ai'} onClick={() => setActiveTab('ai')}>AI Assistant</TabButton>
+  const handleGenerateSuggestion = async () => {
+    setIsLoadingAi(true);
+    setError('');
+    setAiSuggestion('');
+    try {
+      // Build project context from assigned projects
+      const projectContext = contactProjects.length > 0
+        ? contactProjects
+            .map(cp => projects.find(p => p.id === cp.projectId)?.goal)
+            .filter(Boolean)
+            .join('\n')
+        : undefined;
+      const s = await getFollowUpSuggestion(contact, settings.productContext, contact.tags, settings.defaultAiModel, projectContext);
+      setAiSuggestion(s);
+    } catch {
+      setError('Failed to generate suggestion. Check your Gemini API key.');
+    } finally {
+      setIsLoadingAi(false);
+    }
+  };
+
+  const handleUseSuggestion = () => {
+    if (!aiSuggestion || !onComposeEmail) return;
+    const lines = aiSuggestion.split('\n');
+    const subjectLine = lines.find(l => l.toLowerCase().startsWith('subject:'));
+    const subject = subjectLine ? subjectLine.replace(/^subject:\s*/i, '') : 'Follow-up';
+    const body = lines.filter(l => !l.toLowerCase().startsWith('subject:')).join('\n').trim();
+    onComposeEmail({ to: contact.email, subject, body, alias: '' }, contact);
+  };
+
+  // Health score
+  const score = calculateHealthScore(contact);
+  const level = getHealthLevel(score);
+  const healthColors = { warm: '#10B981', cooling: '#F59E0B', cold: '#EF4444' };
+  const healthColor = healthColors[level];
+  const daysAgo = daysSince(contact.lastContacted);
+
+  const contactTypeOptions: { value: ContactType; label: string }[] = [
+    { value: 'instructor', label: 'Instructor' },
+    { value: 'media', label: 'Media' },
+    { value: 'other', label: 'Other' },
+  ];
+
+  // --- Left column: contact info ---
+  const renderLeftColumn = () => (
+    <div className="md:col-span-1 flex flex-col gap-4 overflow-y-auto pr-1">
+      {/* Avatar + name + stage */}
+      <div className="flex items-start gap-4">
+        <img src={contact.avatarUrl} alt={contact.name} className="w-16 h-16 rounded-full object-cover flex-shrink-0" />
+        <div className="flex-1 min-w-0">
+          <input
+            type="text"
+            name="name"
+            value={editableContact.name}
+            onChange={handleFieldChange}
+            className="bg-transparent text-lg font-bold text-text-primary w-full rounded px-1 py-0.5 focus:ring-1 focus:ring-outreach/50 outline-none"
+          />
+          <select
+            name="pipelineStage"
+            value={editableContact.pipelineStage}
+            onChange={handleFieldChange}
+            className="mt-1 bg-base-700 border border-base-600 text-text-secondary text-xs rounded-full px-2 py-1 outline-none focus:ring-1 focus:ring-outreach/50 w-full"
+          >
+            {settings.pipelineStages.map(s => <option key={s} value={s}>{s}</option>)}
+          </select>
+          {/* Health dot */}
+          <div className="flex items-center gap-1.5 mt-2">
+            <span className="inline-block w-2 h-2 rounded-full" style={{ background: healthColor }} />
+            <span className="text-xs" style={{ color: healthColor }}>{level.charAt(0).toUpperCase() + level.slice(1)}</span>
+            <span className="text-xs text-text-muted">· {daysAgo === 9999 ? 'Never contacted' : `${daysAgo}d since contact`}</span>
+          </div>
         </div>
-        {activeTab === 'interactions' && renderInteractions()}
-        {activeTab === 'tasks' && renderTasks()}
-        {activeTab === 'ai' && renderAIAssistant()}
-        {activeTab === 'partnership' && renderPartnershipDetails()}
+      </div>
+
+      {/* Deal type */}
+      {editableContact.pipelineStage === 'Closed - Success' && !editableContact.partnershipType && !isEditingDealType && (
+        <div className="bg-outreach-dim border border-outreach/30 p-3 rounded-lg text-center">
+          <p className="text-xs text-text-secondary mb-2 font-medium">Classify this deal:</p>
+          <div className="flex justify-center gap-2">
+            <button onClick={() => classifyDeal(PartnershipType.SALE)} className="text-xs px-3 py-1.5 rounded-lg bg-sold-dim text-sold-light border border-sold/30 hover:bg-sold/20">Sale</button>
+            <button onClick={() => classifyDeal(PartnershipType.PARTNER)} className="text-xs px-3 py-1.5 rounded-lg bg-partner-dim text-partner-light border border-partner/30 hover:bg-partner/20">Partnership</button>
+          </div>
+        </div>
+      )}
+      {editableContact.partnershipType && (
+        <div className={`flex items-center justify-between p-2 rounded-lg border ${editableContact.partnershipType === PartnershipType.PARTNER ? 'bg-partner-dim border-partner/30 text-partner-light' : 'bg-sold-dim border-sold/30 text-sold-light'}`}>
+          <span className="text-xs font-semibold uppercase tracking-wide">
+            {editableContact.partnershipType === PartnershipType.PARTNER ? '🤝 Partner' : '💰 Customer'}
+          </span>
+          <button onClick={() => setIsEditingDealType(true)} className="text-text-muted hover:text-text-secondary">
+            <PencilAltIcon />
+          </button>
+        </div>
+      )}
+      {isEditingDealType && (
+        <div className="bg-base-700 border border-base-600 p-3 rounded-lg text-center">
+          <p className="text-xs text-text-secondary mb-2">Change deal type:</p>
+          <div className="flex justify-center gap-2">
+            <button onClick={() => classifyDeal(PartnershipType.SALE)} className="text-xs px-3 py-1.5 rounded-lg bg-sold-dim text-sold-light">Sale</button>
+            <button onClick={() => classifyDeal(PartnershipType.PARTNER)} className="text-xs px-3 py-1.5 rounded-lg bg-partner-dim text-partner-light">Partnership</button>
+          </div>
+        </div>
+      )}
+
+      {/* Contact type */}
+      <div>
+        <label className="text-xs text-text-muted mb-1 block">Contact Type</label>
+        <select
+          name="contactType"
+          value={editableContact.contactType || 'instructor'}
+          onChange={handleFieldChange}
+          className="w-full bg-base-700 border border-base-600 rounded-lg px-3 py-2 text-sm text-text-primary outline-none focus:border-outreach/50"
+        >
+          {contactTypeOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+        </select>
+      </div>
+
+      {/* Fields */}
+      <div className="space-y-2">
+        {[
+          { name: 'email' as const, label: 'Email', type: 'email' },
+          { name: 'phone' as const, label: 'Phone', type: 'tel' },
+          { name: 'location' as const, label: 'Location (State)', type: 'text' },
+          { name: 'website' as const, label: 'Website', type: 'url' },
+          { name: 'instagramHandle' as const, label: 'Instagram Handle', type: 'text' },
+        ].map(f => (
+          <div key={f.name}>
+            <label className="text-xs text-text-muted">{f.label}</label>
+            <input
+              type={f.type}
+              name={f.name}
+              value={(editableContact[f.name] as string) || ''}
+              onChange={handleFieldChange}
+              className="w-full bg-base-700 border border-base-600 rounded-lg px-3 py-1.5 text-sm text-text-primary outline-none focus:border-outreach/50 mt-0.5"
+            />
+          </div>
+        ))}
+      </div>
+
+      {/* Social stats */}
+      <div className="grid grid-cols-3 gap-2">
+        {(['followers', 'following', 'posts'] as const).map(f => (
+          <div key={f}>
+            <label className="text-xs text-text-muted capitalize">{f}</label>
+            <input
+              type="number"
+              name={f}
+              value={editableContact[f] || ''}
+              onChange={handleFieldChange}
+              className="w-full bg-base-700 border border-base-600 rounded-lg px-2 py-1.5 text-sm text-text-primary text-center font-mono outline-none focus:border-outreach/50 mt-0.5"
+            />
+          </div>
+        ))}
+      </div>
+
+      {/* Tags */}
+      <div>
+        <label className="text-xs text-text-muted mb-1 block">Tags</label>
+        <div className="bg-base-700 border border-base-600 rounded-lg p-2">
+          <div className="flex flex-wrap gap-1.5 mb-2">
+            {(editableContact.tags || []).map(tag => (
+              <span key={tag} className="flex items-center bg-outreach-dim text-outreach-light text-xs px-2 py-0.5 rounded-full">
+                {tag}
+                <button onClick={() => removeTag(tag)} className="ml-1.5 hover:text-white">×</button>
+              </span>
+            ))}
+          </div>
+          <input
+            type="text"
+            value={tagInput}
+            onChange={e => setTagInput(e.target.value)}
+            onKeyDown={handleTagInputKeyDown}
+            placeholder="Add tag, press Enter…"
+            className="w-full bg-transparent text-sm text-text-primary placeholder-text-muted outline-none"
+          />
+        </div>
+      </div>
+
+      {/* Next follow-up date */}
+      <div>
+        <label className="text-xs text-text-muted mb-1 block">Next Follow-up Date</label>
+        <input
+          type="date"
+          name="nextFollowUpDate"
+          value={editableContact.nextFollowUpDate ? editableContact.nextFollowUpDate.split('T')[0] : ''}
+          onChange={handleFieldChange}
+          className="w-full bg-base-700 border border-base-600 rounded-lg px-3 py-2 text-sm text-text-primary outline-none focus:border-outreach/50"
+        />
+      </div>
+
+      {/* Notes */}
+      <div>
+        <label className="text-xs text-text-muted mb-1 block">Notes</label>
+        <textarea
+          name="richNotes"
+          value={editableContact.richNotes || editableContact.notes || ''}
+          onChange={e => handleUpdate({ richNotes: e.target.value })}
+          placeholder="Private notes about this contact…"
+          className="w-full bg-base-700 border border-base-600 rounded-lg px-3 py-2 text-sm text-text-primary outline-none focus:border-outreach/50 resize-none"
+          rows={4}
+        />
+      </div>
+
+      {/* Biography (read-only from Instagram) */}
+      {contact.biography && (
+        <div>
+          <label className="text-xs text-text-muted mb-1 block">Bio (from Instagram)</label>
+          <p className="text-xs text-text-secondary bg-base-700 border border-base-600 rounded-lg px-3 py-2 whitespace-pre-wrap">{contact.biography}</p>
+        </div>
+      )}
+
+      {/* Products section */}
+      {products.length > 0 && onLinkProduct && (
+        <div>
+          <label className="text-xs text-text-muted mb-2 block">Products</label>
+          <div className="space-y-2">
+            {contactProducts.map(cp => {
+              const product = products.find(p => p.id === cp.productId);
+              if (!product) return null;
+              return (
+                <div key={cp.id} className="flex items-start gap-2 p-2 bg-base-700 border border-base-600 rounded-lg">
+                  <div className="flex-1 min-w-0">
+                    <div className="text-xs font-semibold text-text-primary">{product.name}</div>
+                    <div className="flex items-center gap-2 mt-1">
+                      <label className="flex items-center gap-1.5 text-xs text-text-muted cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={cp.receivedFree}
+                          onChange={e => onUpdateContactProduct?.({ ...cp, receivedFree: e.target.checked })}
+                          className="accent-partner"
+                        />
+                        Free
+                      </label>
+                      {!cp.receivedFree && (
+                        <div className="flex items-center gap-1">
+                          <input
+                            type="number"
+                            value={cp.quantityPurchased || ''}
+                            onChange={e => onUpdateContactProduct?.({ ...cp, quantityPurchased: parseInt(e.target.value) || 0 })}
+                            placeholder="Qty"
+                            className="w-12 bg-base-800 border border-base-600 rounded px-1 py-0.5 text-xs text-text-primary text-center outline-none"
+                          />
+                          <span className="text-xs text-text-muted">purchased</span>
+                        </div>
+                      )}
+                    </div>
+                    {cp.notes !== undefined && (
+                      <input
+                        type="text"
+                        value={cp.notes || ''}
+                        onChange={e => onUpdateContactProduct?.({ ...cp, notes: e.target.value })}
+                        placeholder="Notes..."
+                        className="mt-1 w-full bg-transparent text-xs text-text-secondary placeholder-text-muted outline-none border-b border-base-600 pb-0.5"
+                      />
+                    )}
+                  </div>
+                  {onUnlinkProduct && (
+                    <button
+                      onClick={() => onUnlinkProduct(cp.id)}
+                      className="text-text-muted hover:text-red-400 transition-colors flex-shrink-0"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+            {/* Add product picker */}
+            {products.filter(p => p.isActive && !contactProducts.find(cp => cp.productId === p.id)).length > 0 && (
+              <select
+                value=""
+                onChange={e => {
+                  if (e.target.value) {
+                    onLinkProduct({ contactId: contact.id, productId: e.target.value, receivedFree: false, notes: '' });
+                  }
+                }}
+                className="w-full bg-base-700 border border-base-600 border-dashed rounded-lg px-2 py-1.5 text-xs text-text-muted focus:outline-none focus:border-outreach transition-colors cursor-pointer"
+              >
+                <option value="">+ Link a product...</option>
+                {products
+                  .filter(p => p.isActive && !contactProducts.find(cp => cp.productId === p.id))
+                  .map(p => (
+                    <option key={p.id} value={p.id}>{p.name}</option>
+                  ))}
+              </select>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Sequences section */}
+      {sequences.length > 0 && (
+        <div>
+          <label className="text-xs text-text-muted mb-2 block">Sequences</label>
+          <div className="space-y-2">
+            {/* Active enrollments */}
+            {contactEnrollments.map(enrollment => {
+              const seq = sequences.find(s => s.id === enrollment.sequenceId);
+              if (!seq) return null;
+              const progress = getSequenceProgress(enrollment, seq);
+              const nextStep = getNextStep(enrollment, seq);
+              const nextDueDate = nextStep ? getStepDueDate(nextStep, enrollment.enrolledAt) : null;
+              const isOverdue = nextDueDate ? nextDueDate <= new Date() : false;
+              return (
+                <div key={enrollment.id} className="p-2.5 bg-base-700 border border-base-600 rounded-lg">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-semibold text-text-primary truncate">{seq.name}</span>
+                        <span className="text-xs text-text-muted font-mono flex-shrink-0">
+                          {progress.completed}/{progress.total}
+                        </span>
+                      </div>
+                      {/* Progress bar */}
+                      <div className="mt-1.5 w-full h-1 bg-base-600 rounded-full overflow-hidden">
+                        <div
+                          className="h-full rounded-full transition-all"
+                          style={{ width: `${progress.percentComplete}%`, background: '#6366F1' }}
+                        />
+                      </div>
+                      {nextStep && nextDueDate && (
+                        <p className="text-xs text-text-muted mt-1.5 truncate">
+                          Next: {nextStep.description}
+                          {' · '}
+                          <span className={isOverdue ? 'text-red-400' : ''}>
+                            {isOverdue ? 'Overdue' : nextDueDate.toLocaleDateString()}
+                          </span>
+                        </p>
+                      )}
+                      {!nextStep && (
+                        <p className="text-xs text-partner-light mt-1">✓ All steps complete</p>
+                      )}
+                    </div>
+                    {onUnenrollContact && (
+                      <button
+                        onClick={() => onUnenrollContact(enrollment.id)}
+                        className="text-text-muted hover:text-red-400 transition-colors flex-shrink-0 text-sm leading-none mt-0.5"
+                        title="Unenroll from sequence"
+                      >
+                        ×
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+
+            {/* Enroll dropdown */}
+            {onEnrollContact && sequences.filter(s => s.isActive && !contactEnrollments.find(e => e.sequenceId === s.id)).length > 0 && (
+              <select
+                value=""
+                onChange={e => {
+                  if (e.target.value) onEnrollContact(e.target.value);
+                }}
+                className="w-full bg-base-700 border border-base-600 border-dashed rounded-lg px-2 py-1.5 text-xs text-text-muted focus:outline-none focus:border-outreach transition-colors cursor-pointer"
+              >
+                <option value="">+ Enroll in sequence...</option>
+                {sequences
+                  .filter(s => s.isActive && !contactEnrollments.find(e => e.sequenceId === s.id))
+                  .map(s => (
+                    <option key={s.id} value={s.id}>{s.name}</option>
+                  ))}
+              </select>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Projects section */}
+      {(contactProjects.length > 0 || (projects.filter(p => p.isActive && !contactProjects.find(cp => cp.projectId === p.id)).length > 0)) && (
+        <div className="border-t border-base-600 pt-4 space-y-2">
+          <h4 className="text-xs font-semibold text-text-muted uppercase tracking-wide">Projects</h4>
+          {contactProjects.map(cp => {
+            const project = projects.find(p => p.id === cp.projectId);
+            if (!project) return null;
+            return (
+              <div key={cp.id} className="flex items-start gap-2 p-2 bg-base-700 border border-base-600 rounded-lg">
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-medium text-text-primary truncate">{project.name}</p>
+                  <p className="text-xs text-text-muted line-clamp-2 mt-0.5">{project.goal}</p>
+                </div>
+                {onUnlinkProject && (
+                  <button
+                    onClick={() => onUnlinkProject(cp.id)}
+                    className="text-text-muted hover:text-red-400 transition-colors flex-shrink-0 text-sm leading-none mt-0.5"
+                    title="Remove from project"
+                  >
+                    ×
+                  </button>
+                )}
+              </div>
+            );
+          })}
+          {onLinkProject && projects.filter(p => p.isActive && !contactProjects.find(cp => cp.projectId === p.id)).length > 0 && (
+            <select
+              value=""
+              onChange={e => { if (e.target.value) onLinkProject(e.target.value); }}
+              className="w-full bg-base-700 border border-base-600 border-dashed rounded-lg px-2 py-1.5 text-xs text-text-muted focus:outline-none focus:border-outreach transition-colors cursor-pointer"
+            >
+              <option value="">+ Assign to project...</option>
+              {projects
+                .filter(p => p.isActive && !contactProjects.find(cp => cp.projectId === p.id))
+                .map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+          )}
+        </div>
+      )}
+
+      {/* Compose email button */}
+      {onComposeEmail && (
+        <button
+          onClick={() => onComposeEmail({ to: contact.email, alias: '' }, contact)}
+          className="w-full flex items-center justify-center gap-2 py-2 text-sm font-medium text-outreach-light bg-outreach-dim border border-outreach/30 hover:bg-outreach/20 rounded-lg transition-colors"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+          </svg>
+          Compose Email
+        </button>
+      )}
+
+      {/* Delete */}
+      <div className="border-t border-base-600 pt-4">
+        <button
+          onClick={handleDelete}
+          className="w-full flex items-center justify-center gap-2 py-2 text-sm font-medium text-red-400 bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 rounded-lg transition-colors"
+        >
+          <TrashIcon />
+          Delete Contact
+        </button>
+      </div>
     </div>
   );
 
-  const renderInteractions = () => ( <div className="md:col-span-1 flex flex-col flex-grow mt-4"> <div className="flex justify-between items-center mb-4"> <h4 className="font-semibold text-white">Communication History</h4> <button onClick={handleGmailSync} title="Sync with Gmail" disabled={!isGmailConnected || isSyncing} className="flex items-center text-xs bg-primary px-2 py-1 rounded hover:bg-highlight disabled:bg-gray-500 disabled:cursor-not-allowed"><RefreshIcon /><span className="ml-1">{isSyncing ? 'Syncing...' : 'Sync Gmail'}</span></button> </div> <div className="flex-grow space-y-4 overflow-y-auto pr-2 bg-primary p-2 rounded-md"> {contact.interactions.length > 0 ? [...contact.interactions].sort((a,b) => new Date(b.date).getTime() - new Date(a.date).getTime()).map(int => ( <div key={int.id} className="text-sm"><div className="flex items-center space-x-2 text-text-secondary"><CalendarIcon /><span>{new Date(int.date).toLocaleString()}</span><span className="font-bold text-white">{int.type}</span></div><p className="ml-6 border-l-2 border-accent pl-3 mt-1 text-white whitespace-pre-wrap">{int.notes}</p></div> )) : <p className="text-text-secondary text-sm">No interactions logged yet.</p>}</div> <div className="mt-4"><textarea value={newInteractionNotes} onChange={(e) => setNewInteractionNotes(e.target.value)} placeholder="Log a new call, meeting, or note..." className="w-full bg-accent p-2 rounded-md text-white text-sm focus:ring-2 focus:ring-highlight outline-none" rows={2}></textarea><button onClick={handleAddNote} className="mt-2 w-full bg-highlight text-white px-3 py-1.5 rounded-md text-sm font-medium hover:bg-blue-500">Add Log</button></div> </div> );
-  const renderAIAssistant = () => ( <div className="md:col-span-1 bg-accent p-4 rounded-lg flex flex-col flex-grow mt-4"> <h4 className="text-lg font-semibold text-white mb-4 flex items-center"><SparklesIcon /><span className="ml-2">AI Follow-up Assistant</span></h4> <div className="flex-grow bg-primary p-3 rounded-md text-sm text-text-secondary overflow-y-auto whitespace-pre-wrap">{isLoadingAi ? 'Generating...' : error ? <p className="text-red-400">{error}</p> : aiSuggestion || 'Click the button below to generate a personalized follow-up email suggestion.'}</div><button onClick={handleGenerateSuggestion} disabled={isLoadingAi} className="mt-4 w-full flex justify-center items-center bg-highlight text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-500 disabled:bg-gray-500">{isLoadingAi ? 'Thinking...' : 'Generate Suggestion'}</button></div> );
-  const renderPartnershipDetails = () => ( <div className="space-y-4 overflow-y-auto pr-2 mt-4 flex-grow bg-primary p-3 rounded-md"> {editableContact.partnerDetails && (<> <div className="grid grid-cols-2 gap-4"><label className={`flex items-center space-x-2 cursor-pointer p-2 rounded-md transition-all ${isFieldDirtyCheck('partnerDetails', true) ? 'ring-2 ring-highlight' : ''}`}><input type="checkbox" checked={editableContact.partnerDetails.contractSigned} onChange={e => handlePartnerDetailChange('contractSigned', e.target.checked)} className="form-checkbox bg-accent text-highlight focus:ring-highlight" /><span>Contract Signed</span></label><label className={`flex items-center space-x-2 cursor-pointer p-2 rounded-md transition-all ${isFieldDirtyCheck('partnerDetails', true) ? 'ring-2 ring-highlight' : ''}`}><input type="checkbox" checked={editableContact.partnerDetails.continueFollowUp} onChange={e => handlePartnerDetailChange('continueFollowUp', e.target.checked)} className="form-checkbox bg-accent text-highlight focus:ring-highlight" /><span>Continue Follow-ups</span></label></div> <div className="border-t border-accent pt-4"><h5 className="font-semibold text-white mb-2">Deliverables</h5><div className="space-y-3"><div className={`p-3 bg-accent rounded-md transition-all ${isFieldDirtyCheck('partnerDetails', true) ? 'ring-2 ring-highlight' : ''}`}><div className="flex justify-between items-center"><span className="font-medium text-white text-sm">Drill Videos:</span><div className="flex items-center space-x-2"><input type="number" value={editableContact.partnerDetails.drillVideosDelivered} onChange={e => handlePartnerDetailChange('drillVideosDelivered', Math.max(0, parseInt(e.target.value)))} className="w-16 bg-primary p-1 rounded text-center" /><span className="text-text-secondary">/</span><input type="number" value={editableContact.partnerDetails.drillVideosAgreed} onChange={e => handlePartnerDetailChange('drillVideosAgreed', Math.max(0, parseInt(e.target.value)))} className="w-16 bg-primary p-1 rounded text-center" /></div></div></div><DeliverableRow isDirty={isFieldDirtyCheck('partnerDetails', true)} label="Testimonial Video" agreed={editableContact.partnerDetails.testimonialVideoAgreed} delivered={editableContact.partnerDetails.testimonialVideoDelivered} onAgreedChange={val => handlePartnerDetailChange('testimonialVideoAgreed', val)} onDeliveredChange={val => handlePartnerDetailChange('testimonialVideoDelivered', val)} /><DeliverableRow isDirty={isFieldDirtyCheck('partnerDetails', true)} label="Website Link" agreed={editableContact.partnerDetails.websiteLinkAgreed} delivered={editableContact.partnerDetails.websiteLinkDelivered} onAgreedChange={val => handlePartnerDetailChange('websiteLinkAgreed', val)} onDeliveredChange={val => handlePartnerDetailChange('websiteLinkDelivered', val)} /><DeliverableRow isDirty={isFieldDirtyCheck('partnerDetails', true)} label="Social Media Post" agreed={editableContact.partnerDetails.socialPostAgreed} delivered={editableContact.partnerDetails.socialPostDelivered} onAgreedChange={val => handlePartnerDetailChange('socialPostAgreed', val)} onDeliveredChange={val => handlePartnerDetailChange('socialPostDelivered', val)} /></div></div> <div className="border-t border-accent pt-4"><h5 className="font-semibold text-white mb-2">Deliverable Links</h5><input type="text" placeholder="Testimonial Video URL" value={editableContact.partnerDetails.testimonialVideoLink} onChange={e => handlePartnerDetailChange('testimonialVideoLink', e.target.value)} className={`w-full bg-accent p-2 rounded mb-2 text-sm ${isFieldDirtyCheck('partnerDetails', true) ? 'ring-2 ring-highlight' : ''}`} /><input type="text" placeholder="Website Link URL" value={editableContact.partnerDetails.websiteLinkUrl} onChange={e => handlePartnerDetailChange('websiteLinkUrl', e.target.value)} className={`w-full bg-accent p-2 rounded mb-2 text-sm ${isFieldDirtyCheck('partnerDetails', true) ? 'ring-2 ring-highlight' : ''}`} /><input type="text" placeholder="Social Post URL" value={editableContact.partnerDetails.socialPostLink} onChange={e => handlePartnerDetailChange('socialPostLink', e.target.value)} className={`w-full bg-accent p-2 rounded text-sm ${isFieldDirtyCheck('partnerDetails', true) ? 'ring-2 ring-highlight' : ''}`} /></div> </>)}</div> );
-  const renderTasks = () => ( <div className="md:col-span-1 flex flex-col flex-grow mt-4"> <h4 className="font-semibold text-white mb-4">Tasks for {contact.name}</h4> <div className="flex-grow space-y-2 overflow-y-auto pr-2 bg-primary p-2 rounded-md"> {tasks.length > 0 ? tasks.map(task => ( <div key={task.id} className="flex items-center justify-between bg-accent p-2 rounded"> <label className="flex items-center space-x-3"> <input type="checkbox" checked={task.completed} onChange={e => onTaskUpdate({...task, completed: e.target.checked})} className="form-checkbox bg-primary text-highlight focus:ring-highlight" /> <span className={`text-sm ${task.completed ? 'line-through text-text-secondary' : 'text-white'}`}>{task.title}</span> </label> <div className="flex items-center space-x-2"> <span className="text-xs text-text-secondary">{new Date(task.dueDate).toLocaleDateString()}</span> <button onClick={() => onTaskDelete(task.id)} className="text-red-400 hover:text-red-300"><TrashIcon /></button> </div> </div> )) : <p className="text-text-secondary text-sm">No tasks for this contact.</p>} </div> <div className="mt-4 border-t border-accent pt-4"> <h5 className="text-white font-semibold text-sm mb-2">Add New Task</h5> <div className="grid grid-cols-1 sm:grid-cols-3 gap-2"> <input type="text" value={newTaskTitle} onChange={e => setNewTaskTitle(e.target.value)} placeholder="Task description..." className="sm:col-span-2 w-full bg-accent p-2 rounded-md text-white text-sm focus:ring-2 focus:ring-highlight outline-none" /> <input type="date" value={newTaskDueDate} onChange={e => setNewTaskDueDate(e.target.value)} className="w-full bg-accent p-2 rounded-md text-white text-sm focus:ring-2 focus:ring-highlight outline-none" /> </div> <button onClick={handleAddTask} className="mt-2 w-full bg-highlight text-white px-3 py-1.5 rounded-md text-sm font-medium hover:bg-blue-500">Add Task</button> </div> </div> );
-  const EditableField: React.FC<{name: keyof Contact, value: any, label: string, type?: string, icon?: React.ReactNode}> = ({ name, value, label, type='text', icon}) => {
-      const dirty = isFieldDirtyCheck(name);
-      return (
-    <div>
-        <label className="text-xs text-text-secondary">{label}</label>
-        <div className="relative">
-            {icon && <div className="absolute left-3 top-1/2 -translate-y-1/2 text-text-secondary">{icon}</div>}
-            <input type={type} name={name} value={value || ''} onChange={handleFieldChange} placeholder={label} className={`w-full bg-accent p-2 rounded text-white text-sm transition-all ${icon ? 'pl-9' : ''} ${dirty ? 'ring-2 ring-highlight' : ''}`}/>
-        </div>
-    </div>
-  )};
+  // --- Right column: tabs ---
+  const renderRightColumn = () => (
+    <div className="md:col-span-2 flex flex-col overflow-hidden">
+      {/* Tab bar */}
+      <div className="flex items-center gap-0 border-b border-base-600 mb-4">
+        <TabBtn active={activeTab === 'timeline'} onClick={() => setActiveTab('timeline')} badge={contact.interactions.length}>
+          Timeline
+        </TabBtn>
+        <TabBtn active={activeTab === 'tasks'} onClick={() => setActiveTab('tasks')} badge={tasks.length}>
+          Tasks
+        </TabBtn>
+        {editableContact.partnershipType === PartnershipType.PARTNER && (
+          <TabBtn active={activeTab === 'partnership'} onClick={() => setActiveTab('partnership')}>
+            Partnership
+          </TabBtn>
+        )}
+        <TabBtn active={activeTab === 'ai'} onClick={() => setActiveTab('ai')}>
+          AI Assistant
+        </TabBtn>
+      </div>
 
-  return (
-    <div className="fixed inset-0 bg-black bg-opacity-70 flex justify-center items-center z-50 p-4">
-      <div className="bg-secondary rounded-lg shadow-2xl w-full max-w-5xl max-h-[90vh] flex flex-col">
-        <div className="p-4 sm:p-6 border-b border-accent flex justify-between items-center"><h2 className="text-2xl font-bold text-white">Contact Details</h2><button onClick={handleClose} className="text-text-secondary hover:text-white transition-colors"><CloseIcon /></button></div>
-        <div className="flex-grow overflow-y-auto p-4 sm:p-6 grid grid-cols-1 md:grid-cols-3 gap-6">
-          <div className="md:col-span-1 space-y-4">
-            <div className="flex items-center space-x-4">
-              <img src={contact.avatarUrl} alt={contact.name} className="w-20 h-20 rounded-full" />
-              <div>
-                <input type="text" name="name" value={editableContact.name} onChange={handleFieldChange} className={`bg-transparent text-xl font-bold text-white w-full rounded p-1 transition-all ${isFieldDirtyCheck('name') ? 'ring-2 ring-highlight' : ''}`}/>
-                <select name="pipelineStage" value={editableContact.pipelineStage} onChange={handleFieldChange} className={`mt-1 bg-accent text-white text-xs rounded-full px-2 py-1 border-transparent outline-none transition-all ${isFieldDirtyCheck('pipelineStage') ? 'ring-2 ring-highlight' : 'focus:ring-2 focus:ring-white'}`}>{settings.pipelineStages.map(stage => <option key={stage} value={stage}>{stage}</option>)}</select>
+      <div className="flex-1 overflow-y-auto">
+        {activeTab === 'timeline' && (
+          <div className="flex flex-col gap-4 h-full">
+            {/* Gmail sync button */}
+            <div className="flex items-center justify-between">
+              <p className="text-xs text-text-muted">Emails, calls, meetings, notes — newest first</p>
+              <button
+                onClick={handleGmailSync}
+                disabled={!isGmailConnected || isSyncing}
+                className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg bg-base-700 border border-base-600 text-text-muted hover:text-text-secondary hover:border-outreach/40 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+                {isSyncing ? 'Syncing…' : 'Sync Gmail'}
+              </button>
+            </div>
+
+            <ContactTimeline
+              interactions={contact.interactions}
+              tasks={tasks}
+              onReply={onComposeEmail ? (i) => onComposeEmail({
+                to: contact.email,
+                alias: '',
+                subject: i.emailSubject ? `Re: ${i.emailSubject}` : '',
+                threadId: i.gmailThreadId,
+                replyToMessageId: i.gmailMessageId,
+              }, contact) : undefined}
+              onTaskUpdate={onTaskUpdate}
+            />
+
+            {/* Log note */}
+            <div className="border-t border-base-600 pt-3 mt-auto">
+              <p className="text-xs text-text-muted mb-2">Log a note, call, or meeting:</p>
+              <div className="flex gap-2">
+                <textarea
+                  placeholder="What happened? Notes from a call, meeting…"
+                  id="new-interaction-notes"
+                  className="flex-1 bg-base-700 border border-base-600 rounded-lg px-3 py-2 text-sm text-text-primary placeholder-text-muted outline-none focus:border-outreach/50 resize-none"
+                  rows={2}
+                />
+                <button
+                  onClick={() => {
+                    const el = document.getElementById('new-interaction-notes') as HTMLTextAreaElement;
+                    if (!el?.value.trim()) return;
+                    onAddInteraction(contact.id, {
+                      id: `int-${Date.now()}`,
+                      type: InteractionType.NOTE,
+                      date: new Date().toISOString(),
+                      notes: el.value,
+                    });
+                    el.value = '';
+                  }}
+                  className="px-3 py-2 bg-outreach-dim border border-outreach/30 text-outreach-light text-xs font-medium rounded-lg hover:bg-outreach/20 transition-colors self-end"
+                >
+                  Log
+                </button>
               </div>
             </div>
-            {(editableContact.pipelineStage === 'Closed - Success' && !editableContact.partnershipType && !isEditingDealType) && ( <div className="bg-highlight/20 p-3 rounded-md text-center"><p className="text-sm text-white mb-2 font-semibold">Classify this successful deal:</p><div className="flex justify-center space-x-2"><button onClick={() => classifyDeal(PartnershipType.SALE)} className="bg-highlight text-xs px-3 py-1 rounded-md">Sale</button><button onClick={() => classifyDeal(PartnershipType.PARTNER)} className="bg-green-500 text-xs px-3 py-1 rounded-md">Partnership</button></div></div> )}
-            {editableContact.partnershipType && ( <div className={`text-center font-bold text-lg text-white bg-accent p-2 rounded-md flex items-center justify-center space-x-2 transition-all ${isFieldDirtyCheck('partnershipType') ? 'ring-2 ring-highlight' : ''}`}><span>DEAL TYPE: {editableContact.partnershipType.toUpperCase()}</span><button onClick={() => setIsEditingDealType(true)} className="text-text-secondary hover:text-white"><PencilAltIcon /></button></div> )}
-            {isEditingDealType && ( <div className="bg-highlight/20 p-3 rounded-md text-center"><p className="text-sm text-white mb-2 font-semibold">Change Deal Type:</p><div className="flex justify-center space-x-2"><button onClick={() => classifyDeal(PartnershipType.SALE)} className="bg-highlight text-xs px-3 py-1 rounded-md">Sale</button><button onClick={() => classifyDeal(PartnershipType.PARTNER)} className="bg-green-500 text-xs px-3 py-1 rounded-md">Partnership</button></div></div> )}
-            
-            <div className="space-y-3">
-              <EditableField name="email" value={editableContact.email} label="Email" type="email" icon={<AtSymbolIcon />} />
-              <EditableField name="phone" value={editableContact.phone} label="Phone" type="tel" icon={<PhoneIcon />} />
-              <EditableField name="location" value={editableContact.location} label="Location" icon={<LocationMarkerIcon />} />
-              <EditableField name="website" value={editableContact.website} label="Website" icon={<LinkIcon />} />
-              <EditableField name="instagramHandle" value={editableContact.instagramHandle} label="Instagram Handle" icon={<UsersIcon />} />
+          </div>
+        )}
+
+        {activeTab === 'tasks' && (
+          <div className="flex flex-col gap-4 h-full">
+            <div className="space-y-2 flex-1 overflow-y-auto">
+              {tasks.length > 0 ? tasks.map(task => {
+                const isOverdue = !task.completed && new Date(task.dueDate) < new Date();
+                return (
+                  <div key={task.id} className="flex items-center gap-3 p-3 bg-base-700 border border-base-600 rounded-lg">
+                    <input
+                      type="checkbox"
+                      checked={task.completed}
+                      onChange={e => onTaskUpdate({ ...task, completed: e.target.checked })}
+                      className="accent-outreach"
+                    />
+                    <div className="flex-1 min-w-0">
+                      <p className={`text-sm ${task.completed ? 'line-through text-text-muted' : 'text-text-primary'}`}>{task.title}</p>
+                      <p className={`text-xs font-mono ${isOverdue ? 'text-red-400' : 'text-text-muted'}`}>
+                        {isOverdue ? '⚠ Overdue · ' : ''}Due {new Date(task.dueDate).toLocaleDateString()}
+                      </p>
+                    </div>
+                    <button onClick={() => onTaskDelete(task.id)} className="text-text-muted hover:text-red-400 transition-colors">
+                      <TrashIcon />
+                    </button>
+                  </div>
+                );
+              }) : (
+                <p className="text-text-muted text-sm py-4">No tasks for this contact.</p>
+              )}
             </div>
 
-            <div className="grid grid-cols-3 gap-2 text-center">
-                <EditableField name="followers" value={editableContact.followers} label="Followers" type="number" />
-                <EditableField name="following" value={editableContact.following} label="Following" type="number" />
-                <EditableField name="posts" value={editableContact.posts} label="Posts" type="number" />
-            </div>
-
-            <div><h4 className="font-semibold text-white text-sm mb-1">Tags</h4><div className={`bg-accent p-2 rounded-md transition-all ${isFieldDirtyCheck('tags') ? 'ring-2 ring-highlight' : ''}`}><div className="flex flex-wrap gap-2 mb-2">{ (editableContact.tags || []).map(tag => ( <span key={tag} className="flex items-center bg-highlight/50 text-blue-200 text-xs px-2 py-1 rounded-full">{tag}<button onClick={() => removeTag(tag)} className="ml-1.5 text-blue-200 hover:text-white"> &times; </button></span> )) }</div><div className="relative"><TagIcon className="absolute left-2 top-1/2 -translate-y-1/2 w-4 h-4 text-text-secondary" /><input type="text" value={tagInput} onChange={e => setTagInput(e.target.value)} onKeyDown={handleTagInputKeyDown} placeholder="Add a tag..." className="w-full bg-primary pl-7 p-1 rounded text-white text-sm" /></div></div></div>
-            <div><h4 className="font-semibold text-white text-sm mb-1">Next Follow-up Date</h4><input type="date" name="nextFollowUpDate" value={editableContact.nextFollowUpDate ? editableContact.nextFollowUpDate.split('T')[0] : ''} onChange={handleFieldChange} className={`w-full bg-accent p-2 rounded text-white text-sm transition-all ${isFieldDirtyCheck('nextFollowUpDate') ? 'ring-2 ring-highlight' : ''}`}/></div>
-            <div><h4 className="font-semibold text-white text-sm mb-1">Biography</h4><p className="text-text-secondary text-sm bg-accent p-3 rounded-md whitespace-pre-wrap max-h-24 overflow-y-auto">{contact.biography || 'No biography.'}</p></div>
-            <div><h4 className="font-semibold text-white text-sm mb-1">My Notes</h4><textarea name="notes" value={editableContact.notes || ''} onChange={handleFieldChange} placeholder="Add private notes..." className={`w-full bg-accent p-2 rounded-md text-white text-sm focus:ring-2 focus:ring-highlight outline-none transition-all ${isFieldDirtyCheck('notes') ? 'ring-2 ring-highlight' : ''}`} rows={3}></textarea></div>
-            <div className="border-t border-accent pt-4 mt-4">
-                <button 
-                    onClick={handleDelete}
-                    className="w-full flex items-center justify-center space-x-2 bg-red-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-red-500 transition-colors duration-200"
+            <div className="border-t border-base-600 pt-4 mt-auto">
+              <p className="text-xs text-text-muted mb-2">Add task:</p>
+              <div className="flex gap-2 flex-wrap">
+                <input
+                  type="text"
+                  value={newTaskTitle}
+                  onChange={e => setNewTaskTitle(e.target.value)}
+                  placeholder="Task description…"
+                  className="flex-1 bg-base-700 border border-base-600 rounded-lg px-3 py-2 text-sm text-text-primary outline-none focus:border-outreach/50"
+                />
+                <input
+                  type="date"
+                  value={newTaskDueDate}
+                  onChange={e => setNewTaskDueDate(e.target.value)}
+                  className="bg-base-700 border border-base-600 rounded-lg px-3 py-2 text-sm text-text-primary outline-none focus:border-outreach/50"
+                />
+                <button
+                  onClick={handleAddTask}
+                  className="px-4 py-2 bg-outreach-dim border border-outreach/30 text-outreach-light text-sm font-medium rounded-lg hover:bg-outreach/20 transition-colors"
                 >
-                    <TrashIcon />
-                    <span>Delete Contact</span>
+                  Add
                 </button>
+              </div>
             </div>
           </div>
-          {renderTabs()}
+        )}
+
+        {activeTab === 'ai' && (
+          <div className="flex flex-col gap-4 h-full">
+            <div className="flex items-center justify-between">
+              <p className="text-xs text-text-muted">
+                Model: <span className="font-mono text-text-secondary">{settings.defaultAiModel || 'gemini-3-flash-preview'}</span>
+              </p>
+            </div>
+            <div className="flex-1 bg-base-700 border border-base-600 rounded-lg p-4 text-sm text-text-secondary overflow-y-auto whitespace-pre-wrap min-h-[200px]">
+              {isLoadingAi ? (
+                <div className="flex items-center gap-2 text-text-muted">
+                  <div className="animate-spin rounded-full h-4 w-4 border-t-2 border-outreach" />
+                  Generating…
+                </div>
+              ) : error ? (
+                <p className="text-red-400">{error}</p>
+              ) : aiSuggestion ? (
+                aiSuggestion
+              ) : (
+                <p className="text-text-muted italic">Click "Generate" to get a personalized follow-up email suggestion for {contact.name}.</p>
+              )}
+            </div>
+            <div className="flex gap-3">
+              <button
+                onClick={handleGenerateSuggestion}
+                disabled={isLoadingAi}
+                className="flex-1 flex items-center justify-center gap-2 py-2 text-sm font-medium bg-outreach-dim border border-outreach/30 text-outreach-light hover:bg-outreach/20 rounded-lg transition-colors disabled:opacity-50"
+              >
+                <SparklesIcon />
+                {isLoadingAi ? 'Generating…' : 'Generate Suggestion'}
+              </button>
+              {aiSuggestion && onComposeEmail && (
+                <button
+                  onClick={handleUseSuggestion}
+                  className="px-4 py-2 text-sm font-medium bg-partner-dim border border-partner/30 text-partner-light hover:bg-partner/20 rounded-lg transition-colors"
+                >
+                  Use in Email
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'partnership' && editableContact.partnerDetails && (
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-3">
+              <label className="flex items-center gap-2 cursor-pointer p-3 bg-base-700 border border-base-600 rounded-lg text-sm text-text-secondary">
+                <input type="checkbox" checked={editableContact.partnerDetails.contractSigned} onChange={e => handlePartnerDetailChange('contractSigned', e.target.checked)} className="accent-partner" />
+                Contract Signed
+              </label>
+              <label className="flex items-center gap-2 cursor-pointer p-3 bg-base-700 border border-base-600 rounded-lg text-sm text-text-secondary">
+                <input type="checkbox" checked={editableContact.partnerDetails.continueFollowUp} onChange={e => handlePartnerDetailChange('continueFollowUp', e.target.checked)} className="accent-partner" />
+                Continue Follow-ups
+              </label>
+            </div>
+
+            <div>
+              <h5 className="text-sm font-semibold text-text-primary mb-2">Deliverables</h5>
+              <div className="space-y-2">
+                <div className="p-3 bg-base-700 border border-base-600 rounded-lg">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm text-text-primary font-medium">Drill Videos</span>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="number"
+                        value={editableContact.partnerDetails.drillVideosDelivered}
+                        onChange={e => handlePartnerDetailChange('drillVideosDelivered', Math.max(0, parseInt(e.target.value) || 0))}
+                        className="w-16 bg-base-600 border border-base-500 rounded px-2 py-1 text-center text-sm font-mono text-text-primary outline-none"
+                      />
+                      <span className="text-text-muted">/</span>
+                      <input
+                        type="number"
+                        value={editableContact.partnerDetails.drillVideosAgreed}
+                        onChange={e => handlePartnerDetailChange('drillVideosAgreed', Math.max(0, parseInt(e.target.value) || 0))}
+                        className="w-16 bg-base-600 border border-base-500 rounded px-2 py-1 text-center text-sm font-mono text-text-primary outline-none"
+                      />
+                    </div>
+                  </div>
+                  {editableContact.partnerDetails.drillVideosAgreed > 0 && (
+                    <div className="mt-2 h-1.5 bg-base-600 rounded-full overflow-hidden">
+                      <div
+                        className="h-full rounded-full transition-all"
+                        style={{
+                          width: `${Math.min(100, Math.round((editableContact.partnerDetails.drillVideosDelivered / editableContact.partnerDetails.drillVideosAgreed) * 100))}%`,
+                          background: editableContact.partnerDetails.drillVideosDelivered >= editableContact.partnerDetails.drillVideosAgreed ? '#10B981' : '#F59E0B',
+                        }}
+                      />
+                    </div>
+                  )}
+                  {editableContact.partnerDetails.drillVideosAgreed > 0 && editableContact.partnerDetails.drillVideosDelivered < editableContact.partnerDetails.drillVideosAgreed && (
+                    <div className="flex items-center gap-2 mt-2">
+                      <label className="text-xs text-text-muted flex-shrink-0">Due date:</label>
+                      <input
+                        type="date"
+                        value={editableContact.partnerDetails.drillVideosDueDate ? editableContact.partnerDetails.drillVideosDueDate.split('T')[0] : ''}
+                        onChange={e => handlePartnerDetailChange('drillVideosDueDate', e.target.value ? new Date(e.target.value).toISOString() : '')}
+                        className={`flex-1 bg-base-600 border rounded px-2 py-1 text-xs font-mono text-text-primary outline-none focus:border-partner/50 transition-colors ${editableContact.partnerDetails.drillVideosDueDate && new Date(editableContact.partnerDetails.drillVideosDueDate) < new Date() ? 'border-red-500/50 text-red-400' : 'border-base-500'}`}
+                      />
+                    </div>
+                  )}
+                </div>
+                <DeliverableRow
+                  label="Testimonial Video"
+                  agreed={editableContact.partnerDetails.testimonialVideoAgreed}
+                  delivered={editableContact.partnerDetails.testimonialVideoDelivered}
+                  onAgreedChange={v => handlePartnerDetailChange('testimonialVideoAgreed', v)}
+                  onDeliveredChange={v => handlePartnerDetailChange('testimonialVideoDelivered', v)}
+                  dueDate={editableContact.partnerDetails.testimonialDueDate}
+                  onDueDateChange={v => handlePartnerDetailChange('testimonialDueDate', v)}
+                />
+                <DeliverableRow
+                  label="Website Link"
+                  agreed={editableContact.partnerDetails.websiteLinkAgreed}
+                  delivered={editableContact.partnerDetails.websiteLinkDelivered}
+                  onAgreedChange={v => handlePartnerDetailChange('websiteLinkAgreed', v)}
+                  onDeliveredChange={v => handlePartnerDetailChange('websiteLinkDelivered', v)}
+                  dueDate={editableContact.partnerDetails.websiteLinkDueDate}
+                  onDueDateChange={v => handlePartnerDetailChange('websiteLinkDueDate', v)}
+                />
+                <DeliverableRow
+                  label="Social Post"
+                  agreed={editableContact.partnerDetails.socialPostAgreed}
+                  delivered={editableContact.partnerDetails.socialPostDelivered}
+                  onAgreedChange={v => handlePartnerDetailChange('socialPostAgreed', v)}
+                  onDeliveredChange={v => handlePartnerDetailChange('socialPostDelivered', v)}
+                  dueDate={editableContact.partnerDetails.socialPostDueDate}
+                  onDueDateChange={v => handlePartnerDetailChange('socialPostDueDate', v)}
+                />
+              </div>
+            </div>
+
+            <div>
+              <h5 className="text-sm font-semibold text-text-primary mb-2">Deliverable Links</h5>
+              <div className="space-y-2">
+                {[
+                  { field: 'testimonialVideoLink' as const, placeholder: 'Testimonial Video URL' },
+                  { field: 'websiteLinkUrl' as const, placeholder: 'Website Link URL' },
+                  { field: 'socialPostLink' as const, placeholder: 'Social Post URL' },
+                ].map(({ field, placeholder }) => (
+                  <input
+                    key={field}
+                    type="url"
+                    value={editableContact.partnerDetails![field]}
+                    onChange={e => handlePartnerDetailChange(field, e.target.value)}
+                    placeholder={placeholder}
+                    className="w-full bg-base-700 border border-base-600 rounded-lg px-3 py-2 text-sm text-text-primary outline-none focus:border-partner/50"
+                  />
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="fixed inset-0 bg-black/70 flex justify-center items-center z-50 p-4 backdrop-blur-sm">
+      <div className="bg-base-800 border border-base-600 rounded-2xl shadow-2xl w-full max-w-5xl max-h-[92vh] flex flex-col">
+        {/* Header */}
+        <div className="px-6 py-4 border-b border-base-600 flex justify-between items-center flex-shrink-0">
+          <h2 className="text-lg font-bold text-text-primary">Contact Details</h2>
+          <button onClick={handleClose} className="text-text-muted hover:text-text-primary transition-colors p-1">
+            <CloseIcon />
+          </button>
         </div>
-        <div className="p-4 bg-accent flex justify-end space-x-3 border-t border-primary">
-            <button onClick={handleClose} className="bg-gray-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-gray-500">Cancel</button>
-            <button onClick={handleSave} disabled={!isDirty} className="bg-highlight text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-500 disabled:bg-gray-500 disabled:cursor-not-allowed">Save Changes</button>
+
+        {/* Body */}
+        <div className="flex-1 overflow-hidden grid grid-cols-1 md:grid-cols-3 gap-6 p-6">
+          {renderLeftColumn()}
+          {renderRightColumn()}
+        </div>
+
+        {/* Footer */}
+        <div className="px-6 py-4 bg-base-700 border-t border-base-600 flex justify-end gap-3 flex-shrink-0 rounded-b-2xl">
+          <button onClick={handleClose} className="px-4 py-2 text-sm font-medium text-text-secondary bg-base-600 hover:bg-base-500 rounded-lg transition-colors">
+            Cancel
+          </button>
+          <button
+            onClick={handleSave}
+            disabled={!isDirty}
+            className="px-4 py-2 text-sm font-medium text-white bg-outreach hover:bg-outreach-light rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            Save Changes
+          </button>
         </div>
       </div>
     </div>
