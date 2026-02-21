@@ -2,13 +2,24 @@
 import { GoogleGenAI } from "@google/genai";
 import { Contact } from '../types';
 
-const apiKey = process.env.API_KEY;
-
-if (!apiKey) {
-    console.error("Gemini API key is not set. Please check your `VITE_GEMINI_API_KEY` environment variable.");
+// Prefer env var (set at build time for Netlify), fall back to localStorage key set via Settings UI
+function getApiKey(): string | undefined {
+  return (process.env.API_KEY as string | undefined) ||
+    (typeof localStorage !== 'undefined' ? localStorage.getItem('crm_gemini_api_key') || undefined : undefined);
 }
 
-const ai = new GoogleGenAI({ apiKey: apiKey! });
+/** Call this from Settings when the user enters their API key */
+export const setGeminiApiKey = (key: string) => {
+  if (typeof localStorage !== 'undefined') {
+    localStorage.setItem('crm_gemini_api_key', key);
+  }
+};
+
+function buildAI(): GoogleGenAI | null {
+  const key = getApiKey();
+  if (!key) return null;
+  return new GoogleGenAI({ apiKey: key });
+}
 
 export const getFollowUpSuggestion = async (
   contact: Contact,
@@ -17,8 +28,10 @@ export const getFollowUpSuggestion = async (
   model: string = 'gemini-3-flash-preview',
   projectContext?: string
 ): Promise<string> => {
-  if (!apiKey) {
-    return "Error: Gemini API key is not configured. Please ensure `VITE_GEMINI_API_KEY` is set in the deployment settings.";
+  const apiKey = getApiKey();
+  const ai = buildAI();
+  if (!apiKey || !ai) {
+    return "Error: Gemini API key is not configured. Add it in Settings → AI Model.";
   }
 
   const interactionHistory = contact.interactions
@@ -89,7 +102,8 @@ export const summarizeEmail = async (
   emailBody: string,
   model: string = 'gemini-3-flash-preview'
 ): Promise<string> => {
-  if (!apiKey) return '';
+  const ai = buildAI();
+  if (!ai) return '';
 
   const prompt = `Summarize the following email in ONE concise sentence (max 20 words). Focus on the key action, request, or topic only. No preamble.
 
@@ -107,7 +121,8 @@ export const getRelationshipSummary = async (
   contact: Contact,
   model: string = 'gemini-3-flash-preview'
 ): Promise<string> => {
-  if (!apiKey) return 'API key not configured.';
+  const ai = buildAI();
+  if (!ai) return 'Gemini API key not configured — add it in Settings → AI Model.';
 
   const recentInteractions = contact.interactions
     .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
@@ -142,8 +157,9 @@ export const generateEmailDraft = async (
   context: string,
   model: string = 'gemini-3-flash-preview'
 ): Promise<{ subject: string; body: string }> => {
-  if (!apiKey) {
-    return { subject: 'Follow Up', body: 'Error: API key not configured.' };
+  const ai = buildAI();
+  if (!ai) {
+    return { subject: 'Follow Up', body: 'Error: Gemini API key not configured — add it in Settings → AI Model.' };
   }
 
   const prompt = `${context}\n\nFormat your response EXACTLY as:\nSubject: [subject line]\n\n[email body only]`;

@@ -171,7 +171,7 @@ export const MOCK_CONTACTS: Contact[] = [
       continueFollowUp: true,
       drillVideosAgreed: 5,
       drillVideosDelivered: 2,
-      drillVideoLinks: ['https://video.link/1', 'https://video.link/2'],
+      drillVideoLinks: [{ url: 'https://video.link/1', deliveredAt: new Date().toISOString() }, { url: 'https://video.link/2', deliveredAt: new Date().toISOString() }],
       testimonialVideoAgreed: true,
       testimonialVideoDelivered: false,
       testimonialVideoLink: '',

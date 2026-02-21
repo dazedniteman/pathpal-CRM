@@ -1,6 +1,6 @@
 
 import React, { useState, useMemo } from 'react';
-import { Contact, EmailDraft, PartnershipType, Sequence, ContactSequence, calculateHealthScore, getHealthLevel, daysSince } from '../../types';
+import { Contact, EmailDraft, PartnershipType, Sequence, ContactSequence, calculateHealthScore, getHealthLevel, daysSince, daysSinceContact } from '../../types';
 import { PriorityBanner } from './PriorityBanner';
 
 interface PeopleWithProductTrackProps {
@@ -21,6 +21,24 @@ const HealthDot: React.FC<{ score: number }> = ({ score }) => {
     <div className="flex items-center gap-1.5">
       <span className="inline-block w-2 h-2 rounded-full" style={{ background: colors[level] }} />
       <span className="text-xs" style={{ color: colors[level] }}>{labels[level]}</span>
+    </div>
+  );
+};
+
+const FanStars: React.FC<{ score?: number }> = ({ score }) => {
+  if (!score) return null;
+  const labels = ['','Neutral','Warm','Enjoys it','Big fan','Raving fan'];
+  return (
+    <div className="flex items-center gap-0.5" title={labels[score]}>
+      {[1,2,3,4,5].map(s => (
+        <svg key={s} xmlns="http://www.w3.org/2000/svg" className="w-3 h-3" viewBox="0 0 24 24"
+          fill={s <= score ? '#F59E0B' : 'none'}
+          stroke={s <= score ? '#F59E0B' : '#4A4D5E'}
+          strokeWidth={1.5}
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
+        </svg>
+      ))}
     </div>
   );
 };
@@ -64,7 +82,7 @@ const FreeCard: React.FC<{
   onComposeEmail: (draft: Partial<EmailDraft>, contact?: Contact) => void;
 }> = ({ contact, onContactClick, onComposeEmail }) => {
   const score = calculateHealthScore(contact);
-  const daysAgo = daysSince(contact.lastContacted);
+  const daysAgo = daysSinceContact(contact);
   const pd = contact.partnerDetails;
   const outstanding = hasOutstandingDeliverables(contact);
 
@@ -89,8 +107,9 @@ const FreeCard: React.FC<{
         <HealthDot score={score} />
       </div>
 
-      <div className="flex items-center gap-3 text-xs text-text-muted">
-        <span>Last contact: <span className="font-mono text-text-secondary">{daysAgo === 9999 ? 'Never' : `${daysAgo}d ago`}</span></span>
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs text-text-muted">Last contact: <span className="font-mono text-text-secondary">{daysAgo === 9999 ? 'Never' : `${daysAgo}d ago`}</span></span>
+        <FanStars score={contact.fanScore} />
       </div>
 
       {pd && (
@@ -136,7 +155,7 @@ const PurchasedCard: React.FC<{
   onComposeEmail: (draft: Partial<EmailDraft>, contact?: Contact) => void;
 }> = ({ contact, onContactClick, onComposeEmail }) => {
   const score = calculateHealthScore(contact);
-  const daysAgo = daysSince(contact.lastContacted);
+  const daysAgo = daysSinceContact(contact);
   return (
     <div
       className="card-elevated card-hover cursor-pointer p-4 flex flex-col gap-3"
@@ -152,8 +171,9 @@ const PurchasedCard: React.FC<{
         </div>
         <HealthDot score={score} />
       </div>
-      <div className="flex items-center gap-3 text-xs text-text-muted">
-        <span>Last contact: <span className="font-mono text-text-secondary">{daysAgo === 9999 ? 'Never' : `${daysAgo}d ago`}</span></span>
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs text-text-muted">Last contact: <span className="font-mono text-text-secondary">{daysAgo === 9999 ? 'Never' : `${daysAgo}d ago`}</span></span>
+        <FanStars score={contact.fanScore} />
       </div>
       <div onClick={e => e.stopPropagation()}>
         <button
@@ -175,7 +195,7 @@ const AwaitingCard: React.FC<{
   onContactClick: (c: Contact) => void;
   onComposeEmail: (draft: Partial<EmailDraft>, contact?: Contact) => void;
 }> = ({ contact, onContactClick, onComposeEmail }) => {
-  const daysAgo = daysSince(contact.lastContacted);
+  const daysAgo = daysSinceContact(contact);
   return (
     <div
       className="card-elevated card-hover cursor-pointer p-4 flex flex-col gap-3"
@@ -210,7 +230,7 @@ export const PeopleWithProductTrack: React.FC<PeopleWithProductTrackProps> = ({ 
 
   // Everyone with product: free recipients, purchasers, or awaiting feedback stage
   const freeRecipients = useMemo(() =>
-    contacts.filter(c => c.partnershipType === PartnershipType.PARTNER)
+    contacts.filter(c => c.partnershipType === PartnershipType.PARTNER && c.pipelineStage !== 'Sent Product; Awaiting Feedback')
       .sort((a, b) => {
         // Outstanding deliverables first
         const aOwes = hasOutstandingDeliverables(a) ? 1 : 0;
@@ -223,13 +243,14 @@ export const PeopleWithProductTrack: React.FC<PeopleWithProductTrackProps> = ({ 
   );
 
   const purchasers = useMemo(() =>
-    contacts.filter(c => c.partnershipType === PartnershipType.SALE)
+    contacts.filter(c => c.partnershipType === PartnershipType.SALE && c.pipelineStage !== 'Sent Product; Awaiting Feedback')
       .sort((a, b) => calculateHealthScore(a) - calculateHealthScore(b)),
     [contacts]
   );
 
+  // Anyone in the awaiting stage, regardless of partnershipType
   const awaitingFeedback = useMemo(() =>
-    contacts.filter(c => c.pipelineStage === 'Sent Product; Awaiting Feedback' && !c.partnershipType)
+    contacts.filter(c => c.pipelineStage === 'Sent Product; Awaiting Feedback')
       .sort((a, b) => new Date(a.lastContacted).getTime() - new Date(b.lastContacted).getTime()),
     [contacts]
   );

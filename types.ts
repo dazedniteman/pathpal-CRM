@@ -92,6 +92,7 @@ export interface Contact {
   partnershipType?: PartnershipType;
   partnerDetails?: PartnerDetails;
   tags?: string[];
+  fanScore?: number;  // 1-5: how enthusiastic this partner/customer is about the product
 }
 
 export interface Task {
@@ -153,10 +154,13 @@ export interface AppSettings {
   kanbanViews?: KanbanView[];
   defaultAiModel?: string;
   geminiModel?: string;
+  geminiApiKey?: string;
   gmailIgnoreList?: GmailIgnoreEntry[];
   newsletterAutoFilter?: boolean;
   emailTrackingEnabled?: boolean;
   supabaseProjectRef?: string;
+  lastGmailSyncAt?: string;    // ISO timestamp of last Sync Gmail run
+  lastBulkSyncAt?: string;     // ISO timestamp of last Bulk Sync run
 }
 
 // --- Phase 2: Product Library ---
@@ -300,7 +304,9 @@ export function getOutreachBucket(pipelineStage: string): OutreachBucket {
 export function calculateHealthScore(contact: Contact): number {
   let score = 100;
   const now = new Date();
-  const lastContact = contact.lastContacted ? new Date(contact.lastContacted) : null;
+  // Use effectiveLastContacted so stale lastContacted field doesn't skew results
+  const effectiveDateStr = effectiveLastContacted(contact);
+  const lastContact = effectiveDateStr ? new Date(effectiveDateStr) : null;
 
   if (lastContact) {
     const daysSince = Math.floor((now.getTime() - lastContact.getTime()) / (1000 * 60 * 60 * 24));
@@ -333,6 +339,25 @@ export function daysSince(dateStr: string | undefined): number {
   const d = new Date(dateStr);
   const now = new Date();
   return Math.floor((now.getTime() - d.getTime()) / (1000 * 60 * 60 * 24));
+}
+
+/**
+ * Returns the most-recent date among lastContacted and all interaction dates.
+ * Use this instead of contact.lastContacted directly to avoid stale values when
+ * lastContacted wasn't updated (e.g. a bulk sync that failed mid-way).
+ */
+export function effectiveLastContacted(contact: Contact): string | undefined {
+  const candidates: string[] = [];
+  if (contact.lastContacted) candidates.push(contact.lastContacted);
+  for (const i of contact.interactions) {
+    if (i.date) candidates.push(i.date);
+  }
+  if (candidates.length === 0) return undefined;
+  return candidates.reduce((a, b) => (new Date(a) > new Date(b) ? a : b));
+}
+
+export function daysSinceContact(contact: Contact): number {
+  return daysSince(effectiveLastContacted(contact));
 }
 
 export function formatTimeAgo(dateStr: string): string {

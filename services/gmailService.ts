@@ -461,6 +461,51 @@ export const sendEmail = async (
   }
 };
 
+// --- NEW: Save an email as a Gmail draft ---
+export const saveEmailAsDraft = async (
+  draft: EmailDraft
+): Promise<{ success: boolean; draftId?: string; error?: string }> => {
+  const token = getAuthToken();
+  if (!token) return { success: false, error: 'Not authenticated with Gmail' };
+
+  try {
+    const from = draft.alias ? `PathPal Golf <${draft.alias}>` : '';
+    const rawEmail = [
+      `From: ${from}`,
+      `To: ${draft.to}`,
+      `Subject: ${draft.subject}`,
+      `MIME-Version: 1.0`,
+      `Content-Type: text/plain; charset=UTF-8`,
+      '',
+      draft.body,
+    ].join('\r\n');
+
+    const encodedEmail = btoa(unescape(encodeURIComponent(rawEmail)))
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/, '');
+
+    const res = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/drafts', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ message: { raw: encodedEmail } }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json();
+      return { success: false, error: err.error?.message || 'Failed to save draft' };
+    }
+
+    const data = await res.json();
+    return { success: true, draftId: data.id };
+  } catch (error: any) {
+    return { success: false, error: error.message || 'Unknown error saving draft' };
+  }
+};
+
 // --- NEW: Check which contacts have unreplied emails (for morning briefing) ---
 export interface UnrepliedEmail {
   contact: Contact;
@@ -536,7 +581,7 @@ export const getGoogleAuthState = (): boolean => {
   return !!(token && token.access_token);
 };
 
-// --- Bulk Gmail sync (180+ days) ---
+// --- Bulk Gmail sync types ---
 
 export interface BulkSyncMatchedContact {
   contactId: string;
@@ -559,17 +604,234 @@ export interface BulkSyncResult {
   totalScanned: number;
 }
 
+// --- Checkpoint system for bulk sync resume ---
+
+export interface BulkSyncCheckpoint {
+  startedAt: string;
+  dayLookback: number;
+  processedContactIds: string[];
+}
+
+const BULK_CHECKPOINT_KEY = 'crm_bulk_sync_checkpoint';
+
+export const getBulkSyncCheckpoint = (): BulkSyncCheckpoint | null => {
+  try {
+    const raw = localStorage.getItem(BULK_CHECKPOINT_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+};
+
+export const clearBulkSyncCheckpoint = (): void => {
+  localStorage.removeItem(BULK_CHECKPOINT_KEY);
+};
+
+const saveBulkCheckpoint = (cp: BulkSyncCheckpoint): void => {
+  localStorage.setItem(BULK_CHECKPOINT_KEY, JSON.stringify(cp));
+};
+
+// Helper: extract all email addresses from a header value (handles "Name <email>" format)
+const extractAllEmails = (str: string): string[] => {
+  if (!str) return [];
+  const matches = str.match(/[^\s<,;]+@[^\s>,;]+/g) || [];
+  return matches.map(e => e.toLowerCase().trim());
+};
+
+// --- Regular sync: pull ALL emails since a given date and route to correct contacts ---
+// This replaces the old per-contact query approach with a date-based inbox scan.
+
+export const syncEmailsSinceDate = async (
+  contacts: Contact[],
+  sinceDate: Date,
+  onProgress?: (scanned: number, total: number, phase: string) => void
+): Promise<BulkSyncResult> => {
+  const token = getAuthToken();
+  if (!token) return { matched: [], pending: [], totalScanned: 0 };
+
+  // Build email → contactId lookup (primary + additional emails)
+  const emailToContactId = new Map<string, string>();
+  for (const c of contacts) {
+    emailToContactId.set(c.email.toLowerCase().trim(), c.id);
+    for (const e of c.additionalEmails || []) {
+      emailToContactId.set(e.toLowerCase().trim(), c.id);
+    }
+  }
+  const contactById = new Map(contacts.map(c => [c.id, c]));
+
+  // Track existing message IDs per contact (to skip already-synced messages)
+  const existingMsgIds = new Map<string, Set<string>>();
+  for (const c of contacts) {
+    existingMsgIds.set(c.id, new Set(
+      c.interactions.filter(i => i.gmailMessageId).map(i => i.gmailMessageId!)
+    ));
+  }
+
+  const afterEpoch = Math.floor(sinceDate.getTime() / 1000);
+  const matchedMap = new Map<string, Interaction[]>();
+  const pendingMap = new Map<string, PendingContact>();
+
+  // Step 1: List all messages since sinceDate (paginate up to 500)
+  const allMessageIds: string[] = [];
+  let nextPageToken: string | undefined;
+  do {
+    const listRes = await window.gapi.client.gmail.users.messages.list({
+      userId: 'me',
+      q: `after:${afterEpoch}`,
+      maxResults: 100,
+      ...(nextPageToken ? { pageToken: nextPageToken } : {}),
+    });
+    const msgs: any[] = listRes.result.messages || [];
+    allMessageIds.push(...msgs.map((m: any) => m.id));
+    nextPageToken = listRes.result.nextPageToken;
+  } while (nextPageToken && allMessageIds.length < 500);
+
+  if (allMessageIds.length === 0) return { matched: [], pending: [], totalScanned: 0 };
+
+  onProgress?.(0, allMessageIds.length, 'listing');
+
+  // Step 2: Fetch metadata to route each email to the right contact(s)
+  interface MsgRoute {
+    msgId: string;
+    threadId: string;
+    contactIds: string[];
+    fromEmail: string;
+    internalDate: string;
+  }
+  const toFullFetch: MsgRoute[] = [];
+
+  for (let i = 0; i < allMessageIds.length; i += 10) {
+    const chunk = allMessageIds.slice(i, Math.min(i + 10, allMessageIds.length));
+    const results = await Promise.all(
+      chunk.map((id: string) => window.gapi.client.gmail.users.messages.get({
+        userId: 'me',
+        id,
+        format: 'metadata',
+        metadataHeaders: ['From', 'To', 'Cc', 'Subject'],
+      }))
+    );
+
+    for (const res of results) {
+      const msg = res.result;
+      const headers: any[] = msg.payload?.headers || [];
+      const from = headers.find((h: any) => h.name.toLowerCase() === 'from')?.value || '';
+      const to = headers.find((h: any) => h.name.toLowerCase() === 'to')?.value || '';
+      const cc = headers.find((h: any) => h.name.toLowerCase() === 'cc')?.value || '';
+      const subject = headers.find((h: any) => h.name.toLowerCase() === 'subject')?.value || 'No Subject';
+
+      const fromEmail = extractAllEmails(from)[0] || '';
+      const allAddrs = [fromEmail, ...extractAllEmails(to), ...extractAllEmails(cc)];
+
+      // Find which contacts are involved in this email
+      const involvedIds = new Set<string>();
+      for (const addr of allAddrs) {
+        const cId = emailToContactId.get(addr);
+        if (cId) involvedIds.add(cId);
+      }
+
+      if (involvedIds.size > 0) {
+        toFullFetch.push({
+          msgId: msg.id,
+          threadId: msg.threadId,
+          contactIds: Array.from(involvedIds),
+          fromEmail,
+          internalDate: msg.internalDate,
+        });
+      } else if (fromEmail.includes('@') && !emailToContactId.has(fromEmail)) {
+        // Unknown sender — surface as pending
+        const fromNameMatch = from.match(/^([^<]+)</);
+        const fromName = fromNameMatch?.[1]?.trim();
+        if (!pendingMap.has(fromEmail)) {
+          pendingMap.set(fromEmail, {
+            fromEmail,
+            fromName,
+            subject,
+            date: new Date(parseInt(msg.internalDate)).toISOString(),
+            snippet: msg.snippet || '',
+            gmailMessageId: msg.id,
+            gmailThreadId: msg.threadId,
+          });
+        }
+      }
+    }
+
+    onProgress?.(Math.min(i + 10, allMessageIds.length), allMessageIds.length, 'routing');
+    if (i + 10 < allMessageIds.length) await new Promise(r => setTimeout(r, 100));
+  }
+
+  // Step 3: Fetch full bodies for matched messages (one fetch per unique message)
+  for (let i = 0; i < toFullFetch.length; i += 5) {
+    const chunk = toFullFetch.slice(i, Math.min(i + 5, toFullFetch.length));
+    const results = await Promise.all(
+      chunk.map(f => window.gapi.client.gmail.users.messages.get({
+        userId: 'me',
+        id: f.msgId,
+        format: 'full',
+      }))
+    );
+
+    for (let k = 0; k < results.length; k++) {
+      const msgData = results[k].result;
+      const fetchInfo = chunk[k];
+      const headers: any[] = msgData.payload?.headers || [];
+      const subject = headers.find((h: any) => h.name.toLowerCase() === 'subject')?.value || 'No Subject';
+      const fromHdr = headers.find((h: any) => h.name.toLowerCase() === 'from')?.value || '';
+      const toHdr = headers.find((h: any) => h.name.toLowerCase() === 'to')?.value || '';
+      const body = extractEmailBody(msgData.payload);
+      const date = new Date(parseInt(msgData.internalDate)).toISOString();
+
+      for (const contactId of fetchInfo.contactIds) {
+        const existingIds = existingMsgIds.get(contactId) || new Set<string>();
+        if (existingIds.has(msgData.id)) continue; // already synced for this contact
+
+        const contact = contactById.get(contactId);
+        if (!contact) continue;
+
+        const allContactEmails = [contact.email, ...(contact.additionalEmails || [])].map(e => e.toLowerCase().trim());
+        const isFromContact = allContactEmails.includes(fetchInfo.fromEmail);
+
+        const interaction: Interaction = {
+          id: `gmail-${msgData.id}`,
+          type: InteractionType.EMAIL,
+          date,
+          notes: `Subject: ${subject}\n\n${msgData.snippet || ''}`,
+          outcome: 'Synced from Gmail',
+          gmailMessageId: msgData.id,
+          gmailThreadId: msgData.threadId,
+          emailSubject: subject,
+          emailFrom: fromHdr,
+          emailTo: toHdr,
+          emailBody: body,
+          isSentByUser: !isFromContact,
+        };
+
+        const existing = matchedMap.get(contactId) || [];
+        matchedMap.set(contactId, [...existing, interaction]);
+      }
+    }
+
+    onProgress?.(i + 5, toFullFetch.length, 'fetching');
+    if (i + 5 < toFullFetch.length) await new Promise(r => setTimeout(r, 100));
+  }
+
+  return {
+    matched: Array.from(matchedMap.entries()).map(([contactId, newInteractions]) => ({ contactId, newInteractions })),
+    pending: Array.from(pendingMap.values()),
+    totalScanned: allMessageIds.length,
+  };
+};
+
+// --- Bulk Gmail sync (180+ days, per-contact queries with checkpoint/resume) ---
+
 export const bulkSyncAllEmails = async (
   contacts: Contact[],
   dayLookback: number = 180,
-  onProgress?: (processed: number, total: number, phase: string) => void
+  onProgress?: (processed: number, total: number, phase: string) => void,
+  resumeCheckpoint?: BulkSyncCheckpoint | null
 ): Promise<BulkSyncResult> => {
   const token = getAuthToken();
   if (!token) return { matched: [], pending: [], totalScanned: 0 };
 
   const sinceDate = new Date();
   sinceDate.setDate(sinceDate.getDate() - dayLookback);
-  // Gmail date filter uses epoch seconds
   const afterEpoch = Math.floor(sinceDate.getTime() / 1000);
 
   // Build email → contactId map (covers primary + additional emails)
@@ -590,15 +852,26 @@ export const bulkSyncAllEmails = async (
   }
 
   const matchedMap = new Map<string, Interaction[]>();
-  const seenMessageIds = new Set<string>();
-  const pendingMap = new Map<string, PendingContact>(); // fromEmail → PendingContact
+  const pendingMap = new Map<string, PendingContact>();
 
+  // Determine which contacts to process (skip already-processed ones for resume)
+  const alreadyDone = new Set(resumeCheckpoint?.processedContactIds || []);
+  const contactsToProcess = contacts.filter(c => !alreadyDone.has(c.id));
+  const alreadyProcessedCount = contacts.length - contactsToProcess.length;
   const total = contacts.length;
+
+  // Initialize or restore checkpoint
+  const checkpoint: BulkSyncCheckpoint = resumeCheckpoint || {
+    startedAt: new Date().toISOString(),
+    dayLookback,
+    processedContactIds: [],
+  };
+
   let processed = 0;
 
-  // Process in batches of 3 to respect Gmail API rate limits
-  for (let i = 0; i < contacts.length; i += 3) {
-    const batch = contacts.slice(i, Math.min(i + 3, contacts.length));
+  // Process in batches of 2 to respect Gmail API rate limits
+  for (let i = 0; i < contactsToProcess.length; i += 2) {
+    const batch = contactsToProcess.slice(i, Math.min(i + 2, contactsToProcess.length));
 
     await Promise.all(batch.map(async (contact) => {
       const allEmails = [contact.email, ...(contact.additionalEmails || [])].filter(Boolean);
@@ -614,8 +887,10 @@ export const bulkSyncAllEmails = async (
         const messages: { id: string }[] = listRes.result.messages || [];
 
         const existingIds = existingMsgIds.get(contact.id) || new Set<string>();
-        const newMessages = messages.filter(m => !seenMessageIds.has(m.id) && !existingIds.has(m.id));
-        newMessages.forEach(m => seenMessageIds.add(m.id));
+        // KEY FIX: Only filter out messages already synced for THIS contact.
+        // Do NOT use a global seenMessageIds — the same email legitimately belongs
+        // in multiple contacts' timelines (e.g. a thread between two contacts).
+        const newMessages = messages.filter(m => !existingIds.has(m.id));
 
         if (newMessages.length === 0) return;
 
@@ -655,14 +930,12 @@ export const bulkSyncAllEmails = async (
               isSentByUser: !isFromContact,
             });
 
-            // Check if the from address is an unknown contact (collect for pending)
+            // Surface unknown senders as pending
             if (!isFromContact) {
-              // Extract raw email from "Name <email>" format
               const fromEmailMatch = from.match(/<([^>]+)>/) || from.match(/([^\s]+@[^\s]+)/);
               const fromEmailClean = fromEmailMatch?.[1]?.toLowerCase()?.trim() || from.toLowerCase().trim();
-              const fromNameMatch = from.match(/^([^<]+)</) ;
+              const fromNameMatch = from.match(/^([^<]+)</);
               const fromName = fromNameMatch?.[1]?.trim();
-
               if (fromEmailClean && fromEmailClean.includes('@') && !emailToContactId.has(fromEmailClean)) {
                 if (!pendingMap.has(fromEmailClean)) {
                   pendingMap.set(fromEmailClean, {
@@ -690,18 +963,24 @@ export const bulkSyncAllEmails = async (
       }
 
       processed++;
-      onProgress?.(processed, total, 'syncing');
+      // Save checkpoint after each contact so we can resume on failure
+      checkpoint.processedContactIds.push(contact.id);
+      saveBulkCheckpoint(checkpoint);
+      onProgress?.(alreadyProcessedCount + processed, total, 'syncing');
     }));
 
-    // Brief pause between batches to avoid rate limits
-    if (i + 3 < contacts.length) {
-      await new Promise(resolve => setTimeout(resolve, 300));
+    // Pause between batches to avoid Gmail API rate limits
+    if (i + 2 < contactsToProcess.length) {
+      await new Promise(resolve => setTimeout(resolve, 500));
     }
   }
+
+  // All done — clear checkpoint
+  clearBulkSyncCheckpoint();
 
   return {
     matched: Array.from(matchedMap.entries()).map(([contactId, newInteractions]) => ({ contactId, newInteractions })),
     pending: Array.from(pendingMap.values()),
-    totalScanned: seenMessageIds.size,
+    totalScanned: contactsToProcess.length,
   };
 };

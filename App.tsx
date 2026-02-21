@@ -34,8 +34,11 @@ import {
   fetchEmailsForContactWithBodies, fetchEmailAliases, sendEmail,
   getContactsNeedingEmailReply, UnrepliedEmail,
   bulkSyncAllEmails, PendingContact,
+  getBulkSyncCheckpoint, clearBulkSyncCheckpoint, BulkSyncCheckpoint,
+  syncEmailsSinceDate,
 } from './services/gmailService';
 import { PendingContactsModal } from './components/PendingContactsModal';
+import { setGeminiApiKey } from './services/geminiService';
 import * as db from './services/dataService';
 
 const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
@@ -116,7 +119,7 @@ const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
       setContacts(fetchedContacts);
       setTasks(fetchedTasks);
       if (fetchedSettings) {
-        setSettings({
+        const merged = {
           productContext: 'PathPal Golf sells premium physical golf training aids: The PathPal (swing path trainer) and The TrueStrike (feedback mat). We work with golf instructors and media to grow our brand through authentic partnerships and education.',
           defaultFollowUpDays: 30,
           defaultAiModel: 'gemini-3-flash-preview',
@@ -124,7 +127,9 @@ const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
           newsletterAutoFilter: true,
           ...fetchedSettings,
           kanbanViews: fetchedSettings.kanbanViews || [],
-        });
+        };
+        setSettings(merged);
+        if (merged.geminiApiKey) setGeminiApiKey(merged.geminiApiKey);
       } else {
         const defaultSettings: AppSettings = {
           productContext: 'PathPal Golf sells premium physical golf training aids: The PathPal (swing path trainer) and The TrueStrike (feedback mat). We work with golf instructors and media to grow our brand through authentic partnerships and education.',
@@ -177,6 +182,8 @@ const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
   const handleSettingsUpdate = useCallback(async (newSettings: AppSettings) => {
     setSettings(newSettings);
     await db.saveSettings(newSettings);
+    // Persist Gemini API key to localStorage so it's available at runtime
+    if (newSettings.geminiApiKey) setGeminiApiKey(newSettings.geminiApiKey);
   }, []);
 
   const handleContactUpdate = useCallback(async (updatedContact: Contact) => {
@@ -275,62 +282,95 @@ const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
   }, [googleAuthState, selectedContact]);
 
   // Global Gmail sync for Command Center
+  // Scans ALL emails since last sync date and routes them to the correct contacts.
   const handleGlobalGmailSync = useCallback(async () => {
     if (!googleAuthState.isAuthenticated) return;
     setIsSyncingGmail(true);
     try {
-      // Sync top active contacts (not closed-unsuccessful) up to 20
-      const activeContacts = contacts
-        .filter(c => c.pipelineStage !== 'Closed - Unsuccessful')
-        .sort((a, b) => new Date(b.lastContacted || 0).getTime() - new Date(a.lastContacted || 0).getTime())
-        .slice(0, 20);
+      // Default to last 24h if this is the first sync (user should run Bulk Sync for full history)
+      const sinceDate = settings.lastGmailSyncAt
+        ? new Date(settings.lastGmailSyncAt)
+        : new Date(Date.now() - 24 * 60 * 60 * 1000);
 
-      const updatedContacts = [...contacts];
+      const result = await syncEmailsSinceDate(contacts, sinceDate);
 
-      for (const contact of activeContacts) {
-        try {
-          const emails = await fetchEmailsForContactWithBodies(contact.email);
-          if (emails.length === 0) continue;
-
+      if (result.matched.length > 0) {
+        const updatedContacts = [...contacts];
+        for (const { contactId, newInteractions } of result.matched) {
+          const idx = updatedContacts.findIndex(c => c.id === contactId);
+          if (idx === -1) continue;
+          const contact = updatedContacts[idx];
           const existingIds = new Set(contact.interactions.map(i => i.id));
-          const newInteractions = emails.filter(e => !existingIds.has(e.id));
-          if (newInteractions.length === 0) continue;
-
+          const existingGmailIds = new Set(contact.interactions.filter(i => i.gmailMessageId).map(i => i.gmailMessageId!));
+          const trulyNew = newInteractions.filter(i =>
+            !existingIds.has(i.id) && !(i.gmailMessageId && existingGmailIds.has(i.gmailMessageId))
+          );
+          if (trulyNew.length === 0) continue;
+          const merged = [...trulyNew, ...contact.interactions].sort(
+            (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()
+          );
           const updatedContact = await db.updateContact({
             ...contact,
-            interactions: [...newInteractions, ...contact.interactions],
-            lastContacted: newInteractions[0].date,
+            interactions: merged,
+            lastContacted: merged[0].date,
           });
-
-          const idx = updatedContacts.findIndex(c => c.id === updatedContact.id);
-          if (idx !== -1) updatedContacts[idx] = updatedContact;
-        } catch (err) {
-          // Skip contacts that fail
-          console.warn(`Failed to sync ${contact.email}:`, err);
+          updatedContacts[idx] = updatedContact;
         }
+        setContacts(updatedContacts);
       }
 
-      setContacts([...updatedContacts]);
+      // Surface unknown senders in pending modal
+      if (result.pending.length > 0) {
+        setPendingContacts(result.pending);
+        setIsPendingModalOpen(true);
+      }
+
+      // Record last sync time
+      const newSettings = { ...settings, lastGmailSyncAt: new Date().toISOString() };
+      setSettings(newSettings);
+      db.saveSettings(newSettings);
+    } catch (err) {
+      console.error('Gmail sync error:', err);
     } finally {
       setIsSyncingGmail(false);
     }
-  }, [googleAuthState.isAuthenticated, contacts]);
+  }, [googleAuthState.isAuthenticated, contacts, settings]);
 
-  // Bulk Gmail sync (180 days, all contacts)
+  // Bulk Gmail sync (180 days, all contacts, with checkpoint/resume)
   const handleBulkGmailSync = useCallback(async () => {
     if (!googleAuthState.isAuthenticated) {
       alert('Please connect to Gmail first.');
       return;
     }
-    if (!window.confirm('This will scan your last 180 days of Gmail against all contacts. This may take a few minutes. Continue?')) return;
+
+    // Check for an existing checkpoint from a previous interrupted sync
+    const existingCheckpoint = getBulkSyncCheckpoint();
+    let resumeCheckpoint: BulkSyncCheckpoint | null = null;
+
+    if (existingCheckpoint) {
+      const done = existingCheckpoint.processedContactIds.length;
+      const wantsResume = window.confirm(
+        `A previous bulk sync was interrupted (${done}/${contacts.length} contacts done).\n\nResume from where it left off? (Cancel to start fresh)`
+      );
+      if (wantsResume) {
+        resumeCheckpoint = existingCheckpoint;
+      } else {
+        clearBulkSyncCheckpoint();
+        if (!window.confirm('Start a fresh bulk sync? This will scan the last 180 days of Gmail for all contacts.')) return;
+      }
+    } else {
+      if (!window.confirm('This will scan your last 180 days of Gmail against all contacts. This may take a few minutes. Continue?')) return;
+    }
 
     setIsBulkSyncing(true);
-    setBulkSyncProgress({ processed: 0, total: contacts.length });
+    setBulkSyncProgress({ processed: resumeCheckpoint?.processedContactIds.length || 0, total: contacts.length });
+
     try {
       const result = await bulkSyncAllEmails(
         contacts,
         180,
-        (processed, total) => setBulkSyncProgress({ processed, total })
+        (processed, total) => setBulkSyncProgress({ processed, total }),
+        resumeCheckpoint
       );
 
       // Apply matched interactions to contacts
@@ -341,7 +381,10 @@ const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
           if (idx === -1) continue;
           const contact = updatedContacts[idx];
           const existingIds = new Set(contact.interactions.map(i => i.id));
-          const trulyNew = newInteractions.filter(i => !existingIds.has(i.id));
+          const existingMsgIds = new Set(contact.interactions.filter(i => i.gmailMessageId).map(i => i.gmailMessageId!));
+          const trulyNew = newInteractions.filter(i =>
+            !existingIds.has(i.id) && !(i.gmailMessageId && existingMsgIds.has(i.gmailMessageId))
+          );
           if (trulyNew.length === 0) continue;
           const merged = [...trulyNew, ...contact.interactions].sort(
             (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()
@@ -361,25 +404,29 @@ const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
         setPendingContacts(result.pending);
         setIsPendingModalOpen(true);
       } else {
-        alert(`Bulk sync complete! Synced ${result.matched.length} contacts. No unknown senders found.`);
+        alert(`Bulk sync complete! Synced emails for ${result.matched.length} contacts. No unknown senders found.`);
       }
+
+      const newSettings = { ...settings, lastBulkSyncAt: new Date().toISOString() };
+      setSettings(newSettings);
+      db.saveSettings(newSettings);
     } catch (err) {
       console.error('Bulk sync error:', err);
-      alert('Bulk sync failed. Please try again.');
+      alert('Bulk sync was interrupted. Progress was saved — click Bulk Sync again to resume where it left off.');
     } finally {
       setIsBulkSyncing(false);
       setBulkSyncProgress(null);
     }
-  }, [googleAuthState.isAuthenticated, contacts]);
+  }, [googleAuthState.isAuthenticated, contacts, settings]);
 
-  // Gmail auto-poll every 10 minutes when authenticated
+  // Gmail auto-poll every 10 minutes — only after the user has manually synced at least once
   useEffect(() => {
-    if (!googleAuthState.isAuthenticated) return;
+    if (!googleAuthState.isAuthenticated || !settings.lastGmailSyncAt) return;
     const interval = setInterval(() => {
       handleGlobalGmailSync();
     }, 10 * 60 * 1000);
     return () => clearInterval(interval);
-  }, [googleAuthState.isAuthenticated, handleGlobalGmailSync]);
+  }, [googleAuthState.isAuthenticated, settings.lastGmailSyncAt, handleGlobalGmailSync]);
 
   const handleDragEnd = useCallback(async (contactId: string, newStage: string) => {
     const contactToUpdate = contacts.find(c => c.id === contactId);
@@ -409,6 +456,26 @@ const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
       }
     }
   }, [contacts, sequences, allEnrollments]);
+
+  // Clear all Gmail-synced emails across all contacts (for re-sync)
+  const handleClearGmailEmails = useCallback(async () => {
+    const updatedContacts = contacts.map(c => ({
+      ...c,
+      // Keep only interactions that do NOT have a gmailMessageId (manual entries)
+      interactions: c.interactions.filter(i => !i.gmailMessageId),
+    }));
+    // Save each contact that had Gmail interactions
+    const changed = updatedContacts.filter((c, idx) =>
+      c.interactions.length !== contacts[idx].interactions.length
+    );
+    await Promise.all(changed.map(c => db.updateContact(c)));
+    setContacts(updatedContacts);
+    // Also reset lastBulkSyncAt so the sync time indicator is cleared
+    const newSettings = { ...settings, lastBulkSyncAt: undefined, lastGmailSyncAt: undefined };
+    setSettings(newSettings);
+    db.saveSettings(newSettings);
+    alert(`Done! Cleared Gmail emails from ${changed.length} contacts. You can now re-run Bulk Sync.`);
+  }, [contacts, settings]);
 
   const handleCreateContact = useCallback(async (newContactData: Omit<Contact, 'id'>) => {
     const newContact = await db.createContact(newContactData);
@@ -775,6 +842,7 @@ const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
             googleAuthState={googleAuthState}
             onGoogleSignIn={signIn}
             onGoogleSignOut={signOut}
+            onClearGmailEmails={handleClearGmailEmails}
             projects={projects}
             onCreateProject={handleCreateProject}
             onUpdateProject={handleUpdateProject}
@@ -910,6 +978,7 @@ const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
         <BatchOutreachModal
           contacts={batchOutreachContacts}
           products={products}
+          templates={templates}
           aliases={gmailAliases}
           defaultAlias={gmailAliases.find(a => a.isDefault || a.sendAsEmail.includes('pathpalgolf'))?.sendAsEmail || gmailAliases[0]?.sendAsEmail || ''}
           defaultModel={settings.geminiModel || settings.defaultAiModel || 'gemini-3-flash-preview'}
@@ -967,9 +1036,25 @@ const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
             }
           }}
           onIgnore={(email) => {
+            // Add to Gmail ignore list so it's never shown again
+            const newEntry = { value: email, type: 'email' as const, addedAt: new Date().toISOString() };
+            const newSettings = {
+              ...settings,
+              gmailIgnoreList: [...(settings.gmailIgnoreList || []).filter(e => e.value !== email), newEntry],
+            };
+            setSettings(newSettings);
+            db.saveSettings(newSettings);
             setPendingContacts(prev => prev.filter(p => p.fromEmail !== email));
           }}
           onIgnoreAll={() => {
+            // Add ALL pending to ignore list
+            const newEntries = pendingContacts.map(p => ({
+              value: p.fromEmail, type: 'email' as const, addedAt: new Date().toISOString(),
+            }));
+            const existing = (settings.gmailIgnoreList || []).filter(e => !newEntries.some(n => n.value === e.value));
+            const newSettings = { ...settings, gmailIgnoreList: [...existing, ...newEntries] };
+            setSettings(newSettings);
+            db.saveSettings(newSettings);
             setPendingContacts([]);
             setIsPendingModalOpen(false);
           }}

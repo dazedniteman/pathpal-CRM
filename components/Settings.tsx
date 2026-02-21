@@ -2,6 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import { AppSettings, GoogleAuthState, KanbanView, GmailIgnoreEntry, Project } from '../types';
 import { TrashIcon, PlusIcon, PencilAltIcon, XCircleIcon, CheckCircleIcon } from './icons';
+import { setGeminiApiKey } from '../services/geminiService';
 
 interface SettingsProps {
   settings: AppSettings;
@@ -9,6 +10,7 @@ interface SettingsProps {
   googleAuthState: GoogleAuthState;
   onGoogleSignIn: () => void;
   onGoogleSignOut: () => void;
+  onClearGmailEmails?: () => Promise<void>;
   // Phase 4: Project Flags
   projects?: Project[];
   onCreateProject?: (data: Omit<Project, 'id' | 'createdAt'>) => Promise<void>;
@@ -33,8 +35,10 @@ const AI_MODELS = [
 
 export const Settings: React.FC<SettingsProps> = ({
   settings, onSettingsChange, googleAuthState, onGoogleSignIn, onGoogleSignOut,
+  onClearGmailEmails,
   projects = [], onCreateProject, onUpdateProject, onDeleteProject,
 }) => {
+  const [isClearing, setIsClearing] = useState(false);
   const [localSettings, setLocalSettings] = useState<AppSettings>(settings);
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
   const [editingView, setEditingView] = useState<Partial<KanbanView> | null>(null);
@@ -177,6 +181,42 @@ export const Settings: React.FC<SettingsProps> = ({
           title="AI Model"
           description="Choose which Gemini model to use for email drafts and suggestions."
         >
+          {/* Gemini API Key */}
+          <div>
+            <label className="text-xs text-text-muted mb-1 block">
+              Gemini API Key
+              <span className="ml-1.5 text-text-muted font-normal">(get one free at <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer" className="text-outreach-light hover:underline">aistudio.google.com/apikey</a>)</span>
+            </label>
+            <div className="flex gap-2">
+              <input
+                type="password"
+                name="geminiApiKey"
+                value={localSettings.geminiApiKey || ''}
+                onChange={e => {
+                  setLocalSettings(prev => ({ ...prev, geminiApiKey: e.target.value }));
+                  setSaveStatus('idle');
+                }}
+                className="flex-1 bg-base-700 border border-base-600 rounded-lg px-3 py-2 text-sm text-text-primary outline-none focus:border-outreach/50 font-mono"
+                placeholder="AIza…"
+              />
+              <button
+                type="button"
+                onClick={() => {
+                  if (localSettings.geminiApiKey) {
+                    setGeminiApiKey(localSettings.geminiApiKey);
+                    alert('API key saved to this browser. Click Save Settings to persist to your account.');
+                  }
+                }}
+                className="px-3 py-2 text-xs font-medium bg-outreach-dim border border-outreach/30 text-outreach-light rounded-lg hover:bg-outreach/20 transition-colors whitespace-nowrap"
+              >
+                Apply Key
+              </button>
+            </div>
+            <p className="text-xs text-text-muted mt-1">
+              The key is stored encrypted in your settings. It's used for AI email drafts, email summaries, and relationship analysis.
+            </p>
+          </div>
+
           <div className="space-y-2">
             {AI_MODELS.map(model => (
               <label
@@ -283,6 +323,35 @@ export const Settings: React.FC<SettingsProps> = ({
           )}
         </Section>
 
+        {/* Gmail Data Management */}
+        {onClearGmailEmails && (
+          <Section
+            title="Gmail Data Management"
+            description="Manage emails synced from Gmail. Manual timeline entries (calls, meetings, notes) are never affected."
+          >
+            <div className="flex items-start justify-between gap-4 p-3 bg-red-500/5 border border-red-500/20 rounded-lg">
+              <div>
+                <p className="text-sm font-medium text-text-primary">Clear Gmail-synced emails</p>
+                <p className="text-xs text-text-muted mt-0.5">
+                  Removes all emails imported from Gmail across all contacts so you can re-run Bulk Sync from scratch.
+                  Any emails you sent or logged manually will NOT be deleted.
+                </p>
+              </div>
+              <button
+                onClick={async () => {
+                  if (!window.confirm('This will delete all Gmail-synced email history from every contact. Manual entries (calls, notes, etc.) are kept. Continue?')) return;
+                  setIsClearing(true);
+                  try { await onClearGmailEmails(); } finally { setIsClearing(false); }
+                }}
+                disabled={isClearing}
+                className="flex-shrink-0 px-3 py-2 text-xs font-medium text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg hover:bg-red-500/20 transition-colors disabled:opacity-50"
+              >
+                {isClearing ? 'Clearing…' : 'Clear Gmail Emails'}
+              </button>
+            </div>
+          </Section>
+        )}
+
         {/* Gmail Ignore List */}
         <Section
           title="Gmail Ignore List"
@@ -331,22 +400,30 @@ export const Settings: React.FC<SettingsProps> = ({
 
           {/* Ignore list entries */}
           {(localSettings.gmailIgnoreList || []).length > 0 ? (
-            <div className="space-y-1.5">
-              {(localSettings.gmailIgnoreList || []).map(entry => (
-                <div key={`${entry.type}-${entry.value}`} className="flex items-center justify-between p-2.5 bg-base-700 border border-base-600 rounded-lg">
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs px-1.5 py-0.5 rounded bg-base-600 text-text-muted uppercase font-mono">{entry.type}</span>
-                    <span className="text-sm text-text-secondary font-mono">{entry.value}</span>
+            <details className="group">
+              <summary className="flex items-center justify-between cursor-pointer select-none list-none text-sm font-medium text-text-secondary py-1">
+                <span>{(localSettings.gmailIgnoreList || []).length} entr{(localSettings.gmailIgnoreList || []).length === 1 ? 'y' : 'ies'} in ignore list</span>
+                <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4 transition-transform group-open:rotate-180" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                </svg>
+              </summary>
+              <div className="mt-2 space-y-1.5 max-h-60 overflow-y-auto">
+                {(localSettings.gmailIgnoreList || []).map(entry => (
+                  <div key={`${entry.type}-${entry.value}`} className="flex items-center justify-between p-2.5 bg-base-700 border border-base-600 rounded-lg">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs px-1.5 py-0.5 rounded bg-base-600 text-text-muted uppercase font-mono">{entry.type}</span>
+                      <span className="text-sm text-text-secondary font-mono">{entry.value}</span>
+                    </div>
+                    <button
+                      onClick={() => removeIgnoreEntry(entry.value, entry.type)}
+                      className="text-text-muted hover:text-red-400 transition-colors"
+                    >
+                      <TrashIcon />
+                    </button>
                   </div>
-                  <button
-                    onClick={() => removeIgnoreEntry(entry.value, entry.type)}
-                    className="text-text-muted hover:text-red-400 transition-colors"
-                  >
-                    <TrashIcon />
-                  </button>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            </details>
           ) : (
             <p className="text-xs text-text-muted italic">No entries yet. Add emails or domains to suppress.</p>
           )}

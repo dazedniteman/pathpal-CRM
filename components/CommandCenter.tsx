@@ -28,6 +28,20 @@ interface CommandCenterProps {
   onCompleteStep?: (enrollmentId: string, stepId: string, sequence: Sequence) => Promise<void>;
 }
 
+function formatSyncTime(isoStr?: string): string {
+  if (!isoStr) return 'Never';
+  const d = new Date(isoStr);
+  const now = new Date();
+  const diffMs = now.getTime() - d.getTime();
+  const diffMins = Math.floor(diffMs / 60000);
+  if (diffMins < 1) return 'Just now';
+  if (diffMins < 60) return `${diffMins}m ago`;
+  const diffHours = Math.floor(diffMins / 60);
+  if (diffHours < 24) return `${diffHours}h ago`;
+  const diffDays = Math.floor(diffHours / 24);
+  return `${diffDays}d ago`;
+}
+
 // --- Section Card ---
 const SectionCard: React.FC<{ title: string; count: number; accentColor: string; icon: React.ReactNode; children: React.ReactNode; emptyMessage: string }> = ({
   title, count, accentColor, icon, children, emptyMessage,
@@ -438,31 +452,40 @@ export const CommandCenter: React.FC<CommandCenterProps> = ({
           </div>
           <div className="flex items-center gap-3">
             {googleAuthState.isAuthenticated ? (
-              <>
-                <button
-                  onClick={onSyncGmail}
-                  disabled={isSyncingGmail}
-                  className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-base-700 border border-base-600 text-xs font-medium text-text-secondary hover:text-text-primary hover:border-outreach/50 transition-all disabled:opacity-50"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" className={`w-3.5 h-3.5 ${isSyncingGmail ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                  </svg>
-                  {isSyncingGmail ? 'Syncing…' : 'Sync Gmail'}
-                </button>
-                {onBulkSyncGmail && (
+              <div className="flex flex-col items-end gap-1">
+                <div className="flex items-center gap-2">
                   <button
-                    onClick={onBulkSyncGmail}
-                    disabled={isBulkSyncing || isSyncingGmail}
-                    className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-outreach-dim border border-outreach/30 text-xs font-medium text-outreach-light hover:bg-outreach/20 transition-all disabled:opacity-50"
-                    title="Scan the past 180 days of Gmail for all contacts"
+                    onClick={onSyncGmail}
+                    disabled={isSyncingGmail}
+                    className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-base-700 border border-base-600 text-xs font-medium text-text-secondary hover:text-text-primary hover:border-outreach/50 transition-all disabled:opacity-50"
+                    title="Sync Gmail: Quickly syncs the 20 most recently contacted contacts. Fast — runs every 10 min automatically."
                   >
-                    <svg xmlns="http://www.w3.org/2000/svg" className={`w-3.5 h-3.5 ${isBulkSyncing ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M7 16V4m0 0L3 8m4-4l4 4M17 8v12m0 0l4-4m-4 4l-4-4" />
+                    <svg xmlns="http://www.w3.org/2000/svg" className={`w-3.5 h-3.5 ${isSyncingGmail ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                     </svg>
-                    {isBulkSyncing ? 'Bulk Syncing…' : 'Bulk Sync (180d)'}
+                    {isSyncingGmail ? 'Syncing…' : 'Sync Gmail'}
                   </button>
-                )}
-              </>
+                  {onBulkSyncGmail && (
+                    <button
+                      onClick={onBulkSyncGmail}
+                      disabled={isBulkSyncing || isSyncingGmail}
+                      className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-outreach-dim border border-outreach/30 text-xs font-medium text-outreach-light hover:bg-outreach/20 transition-all disabled:opacity-50"
+                      title="Bulk Sync: Scans ALL 180 days of Gmail for every contact. Takes several minutes. Prevents duplicates automatically."
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" className={`w-3.5 h-3.5 ${isBulkSyncing ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M7 16V4m0 0L3 8m4-4l4 4M17 8v12m0 0l4-4m-4 4l-4-4" />
+                      </svg>
+                      {isBulkSyncing ? 'Bulk Syncing…' : 'Bulk Sync (180d)'}
+                    </button>
+                  )}
+                </div>
+                <div className="flex items-center gap-3 text-xs text-text-muted">
+                  <span>Sync: <span className="font-mono">{formatSyncTime(settings.lastGmailSyncAt)}</span></span>
+                  {settings.lastBulkSyncAt && (
+                    <span>Bulk: <span className="font-mono">{formatSyncTime(settings.lastBulkSyncAt)}</span></span>
+                  )}
+                </div>
+              </div>
             ) : (
               <button
                 onClick={() => onViewChange('settings')}

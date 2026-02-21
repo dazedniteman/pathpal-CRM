@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect } from 'react';
-import { Contact, Interaction, InteractionType, AppSettings, PartnershipType, PartnerDetails, Task, EmailDraft, GmailAlias, ContactType, Product, ContactProduct, Sequence, ContactSequence, Project, ContactProject, DrillVideoLink, calculateHealthScore, getHealthLevel, daysSince } from '../types';
+import { Contact, Interaction, InteractionType, AppSettings, PartnershipType, PartnerDetails, Task, EmailDraft, GmailAlias, ContactType, Product, ContactProduct, Sequence, ContactSequence, Project, ContactProject, DrillVideoLink, calculateHealthScore, getHealthLevel, daysSinceContact } from '../types';
 import { getFollowUpSuggestion, summarizeEmail, getRelationshipSummary } from '../services/geminiService';
 import { getSequenceProgress, getNextStep, getStepDueDate } from '../services/sequenceService';
 import { ContactTimeline } from './ContactTimeline';
@@ -130,8 +130,21 @@ export const ContactModal: React.FC<ContactModalProps> = ({
   useEffect(() => {
     setEditableContact(contact);
     setIsEditingDealType(false);
+    setRelationshipSummary('');
     setActiveTab(contact.partnershipType === PartnershipType.PARTNER ? 'partnership' : 'timeline');
-  }, [contact]);
+  }, [contact.id]);
+
+  // Auto-generate relationship summary when contact has email interactions
+  useEffect(() => {
+    const hasEmails = contact.interactions.some(i => i.type === 'Email');
+    if (hasEmails && !relationshipSummary && !isLoadingRelSummary) {
+      setIsLoadingRelSummary(true);
+      getRelationshipSummary(contact, settings.defaultAiModel)
+        .then(s => setRelationshipSummary(s))
+        .catch(() => {}) // silently skip if AI unavailable
+        .finally(() => setIsLoadingRelSummary(false));
+    }
+  }, [contact.id]);
 
   useEffect(() => {
     setIsDirty(JSON.stringify(contact) !== JSON.stringify(editableContact));
@@ -271,9 +284,15 @@ export const ContactModal: React.FC<ContactModalProps> = ({
   // Drill video helpers
   const addDrillVideo = () => {
     const existing = editableContact.partnerDetails?.drillVideoLinks || [];
-    const updated = [...existing, { url: '' }];
+    const updated = [...existing, { url: '', title: '' }];
+    const delivered = updated.filter(v => v.deliveredAt).length;
     handlePartnerDetailChange('drillVideoLinks', updated);
-    handlePartnerDetailChange('drillVideosAgreed', updated.length);
+    handlePartnerDetailChange('drillVideosDelivered', delivered);
+    // Only increase agreed if adding beyond current agreed count
+    const currentAgreed = editableContact.partnerDetails?.drillVideosAgreed || 0;
+    if (updated.length > currentAgreed) {
+      handlePartnerDetailChange('drillVideosAgreed', updated.length);
+    }
   };
 
   const updateDrillVideo = (idx: number, updated: DrillVideoLink) => {
@@ -282,7 +301,7 @@ export const ContactModal: React.FC<ContactModalProps> = ({
     const delivered = existing.filter(v => v.deliveredAt).length;
     handlePartnerDetailChange('drillVideoLinks', existing);
     handlePartnerDetailChange('drillVideosDelivered', delivered);
-    handlePartnerDetailChange('drillVideosAgreed', existing.length);
+    // Do NOT change drillVideosAgreed — that's managed separately
   };
 
   const removeDrillVideo = (idx: number) => {
@@ -290,7 +309,7 @@ export const ContactModal: React.FC<ContactModalProps> = ({
     const delivered = existing.filter(v => v.deliveredAt).length;
     handlePartnerDetailChange('drillVideoLinks', existing);
     handlePartnerDetailChange('drillVideosDelivered', delivered);
-    handlePartnerDetailChange('drillVideosAgreed', existing.length);
+    // Do NOT change drillVideosAgreed — that stays as the commitment count
   };
 
   // Additional emails helpers
@@ -313,7 +332,7 @@ export const ContactModal: React.FC<ContactModalProps> = ({
   const level = getHealthLevel(score);
   const healthColors = { warm: '#10B981', cooling: '#F59E0B', cold: '#EF4444' };
   const healthColor = healthColors[level];
-  const daysAgo = daysSince(contact.lastContacted);
+  const daysAgo = daysSinceContact(contact);
 
   const contactTypeOptions: { value: ContactType; label: string }[] = [
     { value: 'instructor', label: 'Instructor' },
@@ -371,6 +390,35 @@ export const ContactModal: React.FC<ContactModalProps> = ({
           <button onClick={() => setIsEditingDealType(true)} className="text-text-muted hover:text-text-secondary">
             <PencilAltIcon />
           </button>
+        </div>
+      )}
+
+      {/* Fan / partner enthusiasm score (show for partners/customers) */}
+      {editableContact.partnershipType && (
+        <div className="p-3 bg-base-700 border border-base-600 rounded-lg">
+          <label className="text-xs text-text-muted block mb-2">Fan / Enthusiasm Score</label>
+          <div className="flex items-center gap-1">
+            {[1,2,3,4,5].map(star => (
+              <button
+                key={star}
+                type="button"
+                onClick={() => handleUpdate({ fanScore: editableContact.fanScore === star ? undefined : star })}
+                className="transition-colors focus:outline-none"
+                title={['','Blah / Neutral','Warm / Likes it','Enjoys it','Big fan','Raving fan / Evangelist'][star]}
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" className="w-6 h-6" viewBox="0 0 24 24"
+                  fill={star <= (editableContact.fanScore || 0) ? '#F59E0B' : 'none'}
+                  stroke={star <= (editableContact.fanScore || 0) ? '#F59E0B' : '#4A4D5E'}
+                  strokeWidth={1.5}
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
+                </svg>
+              </button>
+            ))}
+            <span className="text-xs text-text-muted ml-2">
+              {editableContact.fanScore ? ['','Blah / Neutral','Warm','Enjoys it','Big fan','Raving fan'][editableContact.fanScore] : 'Unrated'}
+            </span>
+          </div>
         </div>
       )}
       {isEditingDealType && (
@@ -1019,13 +1067,26 @@ export const ContactModal: React.FC<ContactModalProps> = ({
               <h5 className="text-sm font-semibold text-text-primary mb-2">Deliverables</h5>
               <div className="space-y-2">
                 <div className="p-3 bg-base-700 border border-base-600 rounded-lg space-y-3">
-                  <div className="flex items-center justify-between">
+                  <div className="flex items-center justify-between gap-2">
                     <span className="text-sm text-text-primary font-medium">Drill Videos</span>
                     <span className="text-xs font-mono text-text-muted">
-                      {(editableContact.partnerDetails.drillVideoLinks || []).filter(v => v.deliveredAt).length}
+                      {(editableContact.partnerDetails.drillVideoLinks || []).filter(v => v.deliveredAt).length} delivered
                       {' / '}
-                      {(editableContact.partnerDetails.drillVideoLinks || []).length} delivered
+                      {editableContact.partnerDetails.drillVideosAgreed || 0} committed
                     </span>
+                  </div>
+                  {/* Committed count — editable independently of URL list */}
+                  <div className="flex items-center gap-3">
+                    <label className="text-xs text-text-muted flex-shrink-0">Committed / Agreed:</label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={99}
+                      value={editableContact.partnerDetails.drillVideosAgreed || 0}
+                      onChange={e => handlePartnerDetailChange('drillVideosAgreed', Math.max(0, parseInt(e.target.value) || 0))}
+                      className="w-20 bg-base-600 border border-base-500 rounded px-2 py-1 text-xs font-mono text-text-primary outline-none focus:border-partner/50 text-center"
+                    />
+                    <span className="text-xs text-text-muted">videos</span>
                   </div>
 
                   {/* Per-video rows */}
@@ -1078,16 +1139,16 @@ export const ContactModal: React.FC<ContactModalProps> = ({
                   </button>
 
                   {/* Progress bar */}
-                  {(editableContact.partnerDetails.drillVideoLinks || []).length > 0 && (
+                  {(editableContact.partnerDetails.drillVideosAgreed || 0) > 0 && (
                     <div className="h-1.5 bg-base-600 rounded-full overflow-hidden">
                       <div
                         className="h-full rounded-full transition-all"
                         style={{
                           width: `${Math.min(100, Math.round(
                             ((editableContact.partnerDetails.drillVideoLinks || []).filter(v => v.deliveredAt).length /
-                            (editableContact.partnerDetails.drillVideoLinks || []).length) * 100
+                            (editableContact.partnerDetails.drillVideosAgreed || 1)) * 100
                           ))}%`,
-                          background: (editableContact.partnerDetails.drillVideoLinks || []).filter(v => v.deliveredAt).length >= (editableContact.partnerDetails.drillVideoLinks || []).length ? '#10B981' : '#F59E0B',
+                          background: (editableContact.partnerDetails.drillVideoLinks || []).filter(v => v.deliveredAt).length >= (editableContact.partnerDetails.drillVideosAgreed || 1) ? '#10B981' : '#F59E0B',
                         }}
                       />
                     </div>

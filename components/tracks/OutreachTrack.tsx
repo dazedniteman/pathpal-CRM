@@ -1,7 +1,38 @@
 
 import React, { useState, useMemo } from 'react';
-import { Contact, EmailDraft, OutreachBucket, calculateHealthScore, getHealthLevel, daysSince, ContactSequence, Sequence } from '../../types';
+import { Contact, EmailDraft, OutreachBucket, calculateHealthScore, getHealthLevel, daysSince, daysSinceContact, PartnershipType, ContactSequence, Sequence } from '../../types';
 import { PriorityBanner } from './PriorityBanner';
+
+type SortOption = 'priority' | 'followers' | 'recent' | 'name';
+
+// Priority score: followers size + state overlap with existing partners + tags
+function calcPriorityScore(contact: Contact, partnerLocations: string[]): number {
+  let score = 0;
+  // Followers (0–40 pts)
+  const f = contact.followers || 0;
+  if (f >= 100_000) score += 40;
+  else if (f >= 50_000) score += 30;
+  else if (f >= 25_000) score += 22;
+  else if (f >= 10_000) score += 15;
+  else if (f >= 5_000) score += 10;
+  else score += 4;
+  // State overlap with existing partners (+25 pts)
+  const getState = (loc?: string) => loc?.split(',').pop()?.trim() || '';
+  const contactState = getState(contact.location);
+  if (contactState && partnerLocations.includes(contactState)) score += 25;
+  // Engagement rate (avgLikes/followers) 0–20 pts
+  if (contact.avgLikes && contact.followers) {
+    const er = contact.avgLikes / contact.followers;
+    if (er >= 0.05) score += 20;
+    else if (er >= 0.03) score += 14;
+    else if (er >= 0.01) score += 8;
+    else score += 3;
+  }
+  // High-value tags 0–15 pts
+  const highValue = ['Top Rated Teacher', 'PGA Pro', 'LPGA', 'Tour Player', 'Influencer'];
+  score += (contact.tags || []).filter(t => highValue.includes(t)).length * 5;
+  return score;
+}
 
 interface OutreachTrackProps {
   contacts: Contact[];
@@ -59,9 +90,11 @@ const ContactCard: React.FC<{
   isSelected?: boolean;
   onToggleSelect?: (c: Contact) => void;
   hasActiveSequence?: boolean;
-}> = ({ contact, onContactClick, onComposeEmail, selectionMode, isSelected, onToggleSelect, hasActiveSequence }) => {
+  priorityScore?: number;
+  showPriority?: boolean;
+}> = ({ contact, onContactClick, onComposeEmail, selectionMode, isSelected, onToggleSelect, hasActiveSequence, priorityScore, showPriority }) => {
   const score = calculateHealthScore(contact);
-  const daysAgo = daysSince(contact.lastContacted);
+  const daysAgo = daysSinceContact(contact);
 
   const handleClick = () => {
     if (selectionMode) {
@@ -101,6 +134,15 @@ const ContactCard: React.FC<{
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-sm font-semibold text-text-primary truncate">{contact.name}</span>
             <HealthDot score={score} />
+            {showPriority && priorityScore !== undefined && (
+              <span
+                className="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded flex-shrink-0"
+                style={{ background: '#6366F120', color: '#818CF8' }}
+                title="Priority score"
+              >
+                P{priorityScore}
+              </span>
+            )}
             {hasActiveSequence && (
               <span
                 className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium flex-shrink-0"
@@ -161,6 +203,9 @@ const ContactCard: React.FC<{
 export const OutreachTrack: React.FC<OutreachTrackProps> = ({ contacts, onContactClick, onComposeEmail, onBatchOutreach, contactEnrollments = [], sequences = [] }) => {
   const [activeBucket, setActiveBucket] = useState<OutreachBucket>('in_conversation');
   const [searchQuery, setSearchQuery] = useState('');
+  const [locationFilter, setLocationFilter] = useState('');
+  const [tagFilter, setTagFilter] = useState('');
+  const [sortBy, setSortBy] = useState<SortOption>('priority');
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
@@ -214,14 +259,44 @@ export const OutreachTrack: React.FC<OutreachTrackProps> = ({ contacts, onContac
     [outreachContacts]
   );
 
+  // Partner locations for state-overlap scoring
+  const partnerLocations = useMemo(() => {
+    return contacts
+      .filter(c => c.partnershipType === PartnershipType.PARTNER)
+      .map(c => c.location?.split(',').pop()?.trim() || '')
+      .filter(Boolean);
+  }, [contacts]);
+
+  // All unique tags across outreach contacts
+  const allTags = useMemo(() => {
+    const tags = new Set<string>();
+    outreachContacts.forEach(c => c.tags?.forEach(t => tags.add(t)));
+    return Array.from(tags).sort();
+  }, [outreachContacts]);
+
   const bucketContacts = useMemo(() => {
     const bucket = BUCKETS.find(b => b.id === activeBucket);
     if (!bucket) return [];
     return outreachContacts
       .filter(c => c.pipelineStage === bucket.stage)
       .filter(c => !searchQuery || c.name.toLowerCase().includes(searchQuery.toLowerCase()) || c.email.toLowerCase().includes(searchQuery.toLowerCase()))
-      .sort((a, b) => (b.followers || 0) - (a.followers || 0));
-  }, [outreachContacts, activeBucket, searchQuery]);
+      .filter(c => !locationFilter || (c.location || '').toLowerCase().includes(locationFilter.toLowerCase()))
+      .filter(c => !tagFilter || c.tags?.includes(tagFilter))
+      .sort((a, b) => {
+        switch (sortBy) {
+          case 'priority':
+            return calcPriorityScore(b, partnerLocations) - calcPriorityScore(a, partnerLocations);
+          case 'followers':
+            return (b.followers || 0) - (a.followers || 0);
+          case 'recent':
+            return daysSinceContact(a) - daysSinceContact(b);
+          case 'name':
+            return a.name.localeCompare(b.name);
+          default:
+            return 0;
+        }
+      });
+  }, [outreachContacts, activeBucket, searchQuery, locationFilter, tagFilter, sortBy, partnerLocations]);
 
   const getBucketCount = (bucket: typeof BUCKETS[0]) =>
     outreachContacts.filter(c => c.pipelineStage === bucket.stage).length;
@@ -284,7 +359,7 @@ export const OutreachTrack: React.FC<OutreachTrackProps> = ({ contacts, onContac
               const score = calculateHealthScore(c);
               const level = getHealthLevel(score);
               const colors = { warm: '#10B981', cooling: '#F59E0B', cold: '#EF4444' };
-              const dayCount = daysSince(c.lastContacted);
+              const dayCount = daysSinceContact(c);
               return (
                 <button
                   key={c.id}
@@ -343,9 +418,10 @@ export const OutreachTrack: React.FC<OutreachTrackProps> = ({ contacts, onContac
         })}
       </div>
 
-      {/* Search & Info bar */}
-      <div className="flex items-center justify-between px-6 py-3 gap-4">
-        <div className="relative flex-1 max-w-xs">
+      {/* Search & Filter bar */}
+      <div className="flex flex-wrap items-center gap-2 px-6 py-3 border-b border-base-700">
+        {/* Search */}
+        <div className="relative flex-1 min-w-[160px] max-w-xs">
           <svg xmlns="http://www.w3.org/2000/svg" className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
           </svg>
@@ -353,11 +429,42 @@ export const OutreachTrack: React.FC<OutreachTrackProps> = ({ contacts, onContac
             type="text"
             value={searchQuery}
             onChange={e => setSearchQuery(e.target.value)}
-            placeholder="Search contacts..."
-            className="w-full bg-base-700 border border-base-600 rounded-lg pl-9 pr-3 py-2 text-sm text-text-primary outline-none focus:border-outreach transition-colors"
+            placeholder="Search..."
+            className="w-full bg-base-700 border border-base-600 rounded-lg pl-9 pr-3 py-1.5 text-sm text-text-primary outline-none focus:border-outreach transition-colors"
           />
         </div>
-        <p className="text-xs text-text-muted flex-shrink-0">{activeBucketConfig.description} · {bucketContacts.length} shown</p>
+        {/* Location filter */}
+        <input
+          type="text"
+          value={locationFilter}
+          onChange={e => setLocationFilter(e.target.value)}
+          placeholder="Location..."
+          className="w-32 bg-base-700 border border-base-600 rounded-lg px-3 py-1.5 text-sm text-text-primary outline-none focus:border-outreach transition-colors"
+        />
+        {/* Tag filter */}
+        {allTags.length > 0 && (
+          <select
+            value={tagFilter}
+            onChange={e => setTagFilter(e.target.value)}
+            className="bg-base-700 border border-base-600 rounded-lg px-2 py-1.5 text-sm text-text-primary outline-none focus:border-outreach transition-colors"
+          >
+            <option value="">All tags</option>
+            {allTags.map(t => <option key={t} value={t}>{t}</option>)}
+          </select>
+        )}
+        {/* Sort */}
+        <select
+          value={sortBy}
+          onChange={e => setSortBy(e.target.value as SortOption)}
+          className="bg-base-700 border border-base-600 rounded-lg px-2 py-1.5 text-sm text-text-primary outline-none focus:border-outreach transition-colors"
+        >
+          <option value="priority">Sort: Priority</option>
+          <option value="followers">Sort: Followers</option>
+          <option value="recent">Sort: Most Recent</option>
+          <option value="name">Sort: Name A–Z</option>
+        </select>
+        {/* Count */}
+        <span className="text-xs text-text-muted ml-auto flex-shrink-0">{bucketContacts.length} shown</span>
       </div>
 
       {/* Contact Grid */}
@@ -386,6 +493,8 @@ export const OutreachTrack: React.FC<OutreachTrackProps> = ({ contacts, onContac
                 isSelected={selectedIds.has(contact.id)}
                 onToggleSelect={toggleSelect}
                 hasActiveSequence={contactEnrollments.some(e => e.contactId === contact.id)}
+                priorityScore={calcPriorityScore(contact, partnerLocations)}
+                showPriority={sortBy === 'priority'}
               />
             ))}
           </div>
