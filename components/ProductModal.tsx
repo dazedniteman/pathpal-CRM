@@ -1,6 +1,7 @@
 
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { Product } from '../types';
+import { uploadProductImage } from '../services/dataService';
 
 interface ProductModalProps {
   product?: Product;
@@ -21,6 +22,28 @@ export const ProductModal: React.FC<ProductModalProps> = ({ product, onSave, onD
   const [deleting, setDeleting] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [error, setError] = useState('');
+  const [isUploading, setIsUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith('image/')) { setError('Please select an image file.'); return; }
+    if (file.size > 10 * 1024 * 1024) { setError('Image must be smaller than 10MB.'); return; }
+
+    setIsUploading(true);
+    setError('');
+    try {
+      // Use a temporary ID if creating a new product, or the real product ID if editing
+      const tempId = product?.id || `temp-${Date.now()}`;
+      const url = await uploadProductImage(file, tempId);
+      setPhotoUrl(url);
+    } catch (err: any) {
+      setError(err.message || 'Upload failed. Make sure the "product-images" bucket exists in Supabase Storage.');
+    } finally {
+      setIsUploading(false);
+    }
+  };
 
   const handleSave = async () => {
     if (!name.trim()) { setError('Product name is required.'); return; }
@@ -103,26 +126,63 @@ export const ProductModal: React.FC<ProductModalProps> = ({ product, onSave, onD
             />
           </div>
 
-          {/* Photo URL */}
+          {/* Product Photo */}
           <div>
-            <label className="block text-xs font-medium text-text-muted mb-1.5">Photo URL</label>
-            <input
-              type="url"
-              value={photoUrl}
-              onChange={e => setPhotoUrl(e.target.value)}
-              placeholder="https://..."
-              className="w-full bg-base-700 border border-base-600 rounded-lg px-3 py-2 text-sm text-text-primary placeholder-text-muted focus:outline-none focus:border-outreach transition-colors"
-            />
-            {photoUrl && (
-              <div className="mt-2">
-                <img
-                  src={photoUrl}
-                  alt="Product preview"
-                  className="w-20 h-20 rounded-lg object-cover border border-base-600"
-                  onError={e => (e.currentTarget.style.display = 'none')}
-                />
-              </div>
-            )}
+            <label className="block text-xs font-medium text-text-muted mb-1.5">Product Photo</label>
+
+            {/* Upload area */}
+            <div
+              onClick={() => fileInputRef.current?.click()}
+              className={`relative flex flex-col items-center justify-center w-full border-2 border-dashed rounded-lg py-5 cursor-pointer transition-all ${
+                isUploading ? 'border-outreach/50 bg-outreach/5' : 'border-base-500 hover:border-outreach/40 hover:bg-base-700'
+              }`}
+            >
+              {photoUrl ? (
+                <div className="flex items-center gap-4">
+                  <img
+                    src={photoUrl}
+                    alt="Product preview"
+                    className="w-16 h-16 rounded-lg object-cover border border-base-600 flex-shrink-0"
+                    onError={e => (e.currentTarget.style.display = 'none')}
+                  />
+                  <div className="text-left">
+                    <p className="text-xs text-text-secondary font-medium">Photo uploaded</p>
+                    <p className="text-xs text-text-muted mt-0.5">Click to replace</p>
+                  </div>
+                </div>
+              ) : isUploading ? (
+                <div className="flex flex-col items-center gap-2">
+                  <div className="w-6 h-6 rounded-full border-2 border-t-outreach border-base-500 animate-spin" />
+                  <p className="text-xs text-outreach-light">Uploading…</p>
+                </div>
+              ) : (
+                <div className="flex flex-col items-center gap-2 text-text-muted">
+                  <svg xmlns="http://www.w3.org/2000/svg" className="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                  </svg>
+                  <p className="text-xs font-medium">Click to upload photo</p>
+                  <p className="text-xs">PNG, JPG, WebP up to 10MB</p>
+                </div>
+              )}
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                onChange={handleFileSelect}
+                className="hidden"
+              />
+            </div>
+
+            {/* Manual URL fallback */}
+            <div className="mt-2">
+              <input
+                type="url"
+                value={photoUrl}
+                onChange={e => setPhotoUrl(e.target.value)}
+                placeholder="Or paste image URL…"
+                className="w-full bg-base-700 border border-base-600 rounded-lg px-3 py-1.5 text-xs text-text-secondary placeholder-text-muted focus:outline-none focus:border-outreach/50 transition-colors"
+              />
+            </div>
           </div>
 
           {/* AI Context */}

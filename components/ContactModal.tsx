@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect } from 'react';
-import { Contact, Interaction, InteractionType, AppSettings, PartnershipType, PartnerDetails, Task, EmailDraft, GmailAlias, ContactType, Product, ContactProduct, Sequence, ContactSequence, Project, ContactProject, calculateHealthScore, getHealthLevel, daysSince } from '../types';
-import { getFollowUpSuggestion } from '../services/geminiService';
+import { Contact, Interaction, InteractionType, AppSettings, PartnershipType, PartnerDetails, Task, EmailDraft, GmailAlias, ContactType, Product, ContactProduct, Sequence, ContactSequence, Project, ContactProject, DrillVideoLink, calculateHealthScore, getHealthLevel, daysSince } from '../types';
+import { getFollowUpSuggestion, summarizeEmail, getRelationshipSummary } from '../services/geminiService';
 import { getSequenceProgress, getNextStep, getStepDueDate } from '../services/sequenceService';
 import { ContactTimeline } from './ContactTimeline';
 import { AtSymbolIcon, CalendarIcon, CloseIcon, LinkIcon, LocationMarkerIcon, PencilAltIcon, PhoneIcon, RefreshIcon, SparklesIcon, UsersIcon, TagIcon, PlusIcon, TrashIcon, CheckCircleIcon, XCircleIcon } from './icons';
@@ -123,6 +123,9 @@ export const ContactModal: React.FC<ContactModalProps> = ({
   const [newTaskTitle, setNewTaskTitle] = useState('');
   const [newTaskDueDate, setNewTaskDueDate] = useState('');
   const [isDirty, setIsDirty] = useState(false);
+  const [newEmailInput, setNewEmailInput] = useState('');
+  const [relationshipSummary, setRelationshipSummary] = useState('');
+  const [isLoadingRelSummary, setIsLoadingRelSummary] = useState(false);
 
   useEffect(() => {
     setEditableContact(contact);
@@ -187,6 +190,19 @@ export const ContactModal: React.FC<ContactModalProps> = ({
     }
   };
 
+  const handleGetRelationshipSummary = async () => {
+    setIsLoadingRelSummary(true);
+    try {
+      const s = await getRelationshipSummary(contact, settings.defaultAiModel);
+      setRelationshipSummary(s);
+    } finally {
+      setIsLoadingRelSummary(false);
+    }
+  };
+
+  const handleSummarizeEmail = (body: string) =>
+    summarizeEmail(body, settings.defaultAiModel);
+
   const handleClose = () => {
     if (isDirty) {
       if (window.confirm("You have unsaved changes. Discard them?")) onClose();
@@ -233,6 +249,65 @@ export const ContactModal: React.FC<ContactModalProps> = ({
     onComposeEmail({ to: contact.email, subject, body, alias: '' }, contact);
   };
 
+  // Quick-set follow-up date helpers
+  const setFollowUpQuick = (days: number) => {
+    const d = new Date();
+    d.setDate(d.getDate() + days);
+    handleUpdate({ nextFollowUpDate: d.toISOString() });
+  };
+
+  const followUpInfo = (() => {
+    if (!editableContact.nextFollowUpDate) return null;
+    const date = new Date(editableContact.nextFollowUpDate);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const diffDays = Math.round((date.getTime() - today.getTime()) / 86400000);
+    const isOverdue = diffDays < 0;
+    const dayMonth = date.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+    const relText = diffDays === 0 ? 'Today' : diffDays === 1 ? 'Tomorrow' : diffDays < 0 ? `${Math.abs(diffDays)}d overdue` : `in ${diffDays}d`;
+    return { dayMonth, relText, isOverdue };
+  })();
+
+  // Drill video helpers
+  const addDrillVideo = () => {
+    const existing = editableContact.partnerDetails?.drillVideoLinks || [];
+    const updated = [...existing, { url: '' }];
+    handlePartnerDetailChange('drillVideoLinks', updated);
+    handlePartnerDetailChange('drillVideosAgreed', updated.length);
+  };
+
+  const updateDrillVideo = (idx: number, updated: DrillVideoLink) => {
+    const existing = [...(editableContact.partnerDetails?.drillVideoLinks || [])];
+    existing[idx] = updated;
+    const delivered = existing.filter(v => v.deliveredAt).length;
+    handlePartnerDetailChange('drillVideoLinks', existing);
+    handlePartnerDetailChange('drillVideosDelivered', delivered);
+    handlePartnerDetailChange('drillVideosAgreed', existing.length);
+  };
+
+  const removeDrillVideo = (idx: number) => {
+    const existing = (editableContact.partnerDetails?.drillVideoLinks || []).filter((_, i) => i !== idx);
+    const delivered = existing.filter(v => v.deliveredAt).length;
+    handlePartnerDetailChange('drillVideoLinks', existing);
+    handlePartnerDetailChange('drillVideosDelivered', delivered);
+    handlePartnerDetailChange('drillVideosAgreed', existing.length);
+  };
+
+  // Additional emails helpers
+  const addAdditionalEmail = () => {
+    const trimmed = newEmailInput.trim();
+    if (!trimmed || !trimmed.includes('@')) return;
+    const existing = editableContact.additionalEmails || [];
+    if (!existing.includes(trimmed)) {
+      handleUpdate({ additionalEmails: [...existing, trimmed] });
+    }
+    setNewEmailInput('');
+  };
+
+  const removeAdditionalEmail = (email: string) => {
+    handleUpdate({ additionalEmails: (editableContact.additionalEmails || []).filter(e => e !== email) });
+  };
+
   // Health score
   const score = calculateHealthScore(contact);
   const level = getHealthLevel(score);
@@ -243,6 +318,7 @@ export const ContactModal: React.FC<ContactModalProps> = ({
   const contactTypeOptions: { value: ContactType; label: string }[] = [
     { value: 'instructor', label: 'Instructor' },
     { value: 'media', label: 'Media' },
+    { value: 'customer', label: 'Customer' },
     { value: 'other', label: 'Other' },
   ];
 
@@ -384,13 +460,46 @@ export const ContactModal: React.FC<ContactModalProps> = ({
       {/* Next follow-up date */}
       <div>
         <label className="text-xs text-text-muted mb-1 block">Next Follow-up Date</label>
+        {followUpInfo && (
+          <div className={`flex items-center gap-2 mb-1.5 px-2 py-1 rounded-md ${followUpInfo.isOverdue ? 'bg-red-500/10' : 'bg-base-700'}`}>
+            <span className={`text-sm font-medium ${followUpInfo.isOverdue ? 'text-red-400' : 'text-text-primary'}`}>
+              {followUpInfo.dayMonth}
+            </span>
+            <span className={`text-xs font-mono ${followUpInfo.isOverdue ? 'text-red-400' : 'text-text-muted'}`}>
+              · {followUpInfo.relText}
+            </span>
+            {followUpInfo.isOverdue && <span className="text-xs">⚠</span>}
+          </div>
+        )}
         <input
           type="date"
           name="nextFollowUpDate"
           value={editableContact.nextFollowUpDate ? editableContact.nextFollowUpDate.split('T')[0] : ''}
           onChange={handleFieldChange}
-          className="w-full bg-base-700 border border-base-600 rounded-lg px-3 py-2 text-sm text-text-primary outline-none focus:border-outreach/50"
+          className={`w-full bg-base-700 border rounded-lg px-3 py-2 text-sm text-text-primary outline-none focus:border-outreach/50 ${followUpInfo?.isOverdue ? 'border-red-500/50' : 'border-base-600'}`}
         />
+        <div className="flex gap-1.5 mt-1.5">
+          {[{ label: '+1 Wk', days: 7 }, { label: '+2 Wks', days: 14 }, { label: '+1 Mo', days: 30 }].map(({ label, days }) => (
+            <button
+              key={label}
+              type="button"
+              onClick={() => setFollowUpQuick(days)}
+              className="flex-1 py-1 text-xs font-medium text-text-muted hover:text-text-secondary bg-base-700 hover:bg-base-600 border border-base-600 rounded-md transition-colors"
+            >
+              {label}
+            </button>
+          ))}
+          {editableContact.nextFollowUpDate && (
+            <button
+              type="button"
+              onClick={() => handleUpdate({ nextFollowUpDate: undefined })}
+              className="px-2 py-1 text-xs text-text-muted hover:text-red-400 bg-base-700 hover:bg-red-500/10 border border-base-600 rounded-md transition-colors"
+              title="Clear date"
+            >
+              ✕
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Notes */}
@@ -404,6 +513,50 @@ export const ContactModal: React.FC<ContactModalProps> = ({
           className="w-full bg-base-700 border border-base-600 rounded-lg px-3 py-2 text-sm text-text-primary outline-none focus:border-outreach/50 resize-none"
           rows={4}
         />
+      </div>
+
+      {/* Additional Emails */}
+      <div>
+        <label className="text-xs text-text-muted mb-1 block">Additional Emails</label>
+        <div className="space-y-1">
+          {(editableContact.additionalEmails || []).map(email => (
+            <div key={email} className="flex items-center gap-2 bg-base-700 border border-base-600 rounded-lg px-3 py-1.5">
+              <span className="flex-1 text-sm text-text-primary truncate">{email}</span>
+              <button onClick={() => removeAdditionalEmail(email)} className="text-text-muted hover:text-red-400 transition-colors flex-shrink-0 text-sm">×</button>
+            </div>
+          ))}
+          <div className="flex gap-1.5">
+            <input
+              type="email"
+              value={newEmailInput}
+              onChange={e => setNewEmailInput(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addAdditionalEmail(); } }}
+              placeholder="Add another email…"
+              className="flex-1 bg-base-700 border border-base-600 rounded-lg px-3 py-1.5 text-sm text-text-primary outline-none focus:border-outreach/50"
+            />
+            <button
+              onClick={addAdditionalEmail}
+              className="px-3 py-1.5 text-xs font-medium text-outreach-light bg-outreach-dim border border-outreach/30 hover:bg-outreach/20 rounded-lg transition-colors"
+            >
+              Add
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Stop Follow-up */}
+      <div className={`flex items-center justify-between p-3 rounded-lg border transition-colors ${editableContact.stopFollowUp ? 'bg-amber-950/30 border-amber-500/30' : 'bg-base-700 border-base-600'}`}>
+        <div>
+          <p className="text-sm font-medium text-text-primary">Stop Follow-up</p>
+          <p className="text-xs text-text-muted">Pause outreach without deleting this contact</p>
+        </div>
+        <button
+          type="button"
+          onClick={() => handleUpdate({ stopFollowUp: !editableContact.stopFollowUp })}
+          className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors flex-shrink-0 ${editableContact.stopFollowUp ? 'bg-amber-500' : 'bg-base-500'}`}
+        >
+          <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform ${editableContact.stopFollowUp ? 'translate-x-[1.125rem]' : 'translate-x-0.5'}`} />
+        </button>
       </div>
 
       {/* Biography (read-only from Instagram) */}
@@ -678,6 +831,34 @@ export const ContactModal: React.FC<ContactModalProps> = ({
               </button>
             </div>
 
+            {/* Relationship summary card */}
+            <div className="bg-base-700 border border-base-600 rounded-lg p-3">
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="text-xs font-semibold text-text-muted uppercase tracking-wide flex items-center gap-1.5">
+                  <svg xmlns="http://www.w3.org/2000/svg" className="w-3.5 h-3.5 text-outreach-light" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+                  </svg>
+                  Relationship Overview
+                </span>
+                <button
+                  onClick={handleGetRelationshipSummary}
+                  disabled={isLoadingRelSummary}
+                  className="text-xs text-outreach-light hover:text-outreach transition-colors disabled:opacity-50 flex items-center gap-1"
+                >
+                  {isLoadingRelSummary ? (
+                    <><div className="w-3 h-3 rounded-full border border-t-outreach animate-spin" /> Analyzing…</>
+                  ) : (
+                    <>{relationshipSummary ? 'Refresh' : 'Analyze'}</>
+                  )}
+                </button>
+              </div>
+              {relationshipSummary ? (
+                <p className="text-xs text-text-secondary leading-relaxed">{relationshipSummary}</p>
+              ) : (
+                <p className="text-xs text-text-muted italic">Click "Analyze" for an AI-powered relationship snapshot and next action.</p>
+              )}
+            </div>
+
             <ContactTimeline
               interactions={contact.interactions}
               tasks={tasks}
@@ -689,6 +870,7 @@ export const ContactModal: React.FC<ContactModalProps> = ({
                 replyToMessageId: i.gmailMessageId,
               }, contact) : undefined}
               onTaskUpdate={onTaskUpdate}
+              onSummarizeEmail={handleSummarizeEmail}
             />
 
             {/* Log note */}
@@ -836,44 +1018,77 @@ export const ContactModal: React.FC<ContactModalProps> = ({
             <div>
               <h5 className="text-sm font-semibold text-text-primary mb-2">Deliverables</h5>
               <div className="space-y-2">
-                <div className="p-3 bg-base-700 border border-base-600 rounded-lg">
+                <div className="p-3 bg-base-700 border border-base-600 rounded-lg space-y-3">
                   <div className="flex items-center justify-between">
                     <span className="text-sm text-text-primary font-medium">Drill Videos</span>
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="number"
-                        value={editableContact.partnerDetails.drillVideosDelivered}
-                        onChange={e => handlePartnerDetailChange('drillVideosDelivered', Math.max(0, parseInt(e.target.value) || 0))}
-                        className="w-16 bg-base-600 border border-base-500 rounded px-2 py-1 text-center text-sm font-mono text-text-primary outline-none"
-                      />
-                      <span className="text-text-muted">/</span>
-                      <input
-                        type="number"
-                        value={editableContact.partnerDetails.drillVideosAgreed}
-                        onChange={e => handlePartnerDetailChange('drillVideosAgreed', Math.max(0, parseInt(e.target.value) || 0))}
-                        className="w-16 bg-base-600 border border-base-500 rounded px-2 py-1 text-center text-sm font-mono text-text-primary outline-none"
-                      />
-                    </div>
+                    <span className="text-xs font-mono text-text-muted">
+                      {(editableContact.partnerDetails.drillVideoLinks || []).filter(v => v.deliveredAt).length}
+                      {' / '}
+                      {(editableContact.partnerDetails.drillVideoLinks || []).length} delivered
+                    </span>
                   </div>
-                  {editableContact.partnerDetails.drillVideosAgreed > 0 && (
-                    <div className="mt-2 h-1.5 bg-base-600 rounded-full overflow-hidden">
+
+                  {/* Per-video rows */}
+                  {(editableContact.partnerDetails.drillVideoLinks || []).map((video, idx) => (
+                    <div key={idx} className="flex flex-col gap-1.5 p-2 bg-base-600 rounded-lg">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-text-muted font-mono w-5 flex-shrink-0">#{idx + 1}</span>
+                        <input
+                          type="url"
+                          value={video.url}
+                          onChange={e => updateDrillVideo(idx, { ...video, url: e.target.value })}
+                          placeholder="Video URL…"
+                          className="flex-1 bg-base-700 border border-base-500 rounded px-2 py-1 text-xs text-text-primary outline-none focus:border-partner/50"
+                        />
+                        <button
+                          onClick={() => removeDrillVideo(idx)}
+                          className="text-text-muted hover:text-red-400 transition-colors text-sm flex-shrink-0"
+                          title="Remove video"
+                        >
+                          ×
+                        </button>
+                      </div>
+                      <div className="flex items-center gap-2 pl-7">
+                        <input
+                          type="text"
+                          value={video.title || ''}
+                          onChange={e => updateDrillVideo(idx, { ...video, title: e.target.value })}
+                          placeholder="Title (optional)…"
+                          className="flex-1 bg-base-700 border border-base-500 rounded px-2 py-1 text-xs text-text-primary outline-none focus:border-partner/50"
+                        />
+                        <label className="text-xs text-text-muted flex-shrink-0">Delivered:</label>
+                        <input
+                          type="date"
+                          value={video.deliveredAt ? video.deliveredAt.split('T')[0] : ''}
+                          onChange={e => updateDrillVideo(idx, { ...video, deliveredAt: e.target.value ? new Date(e.target.value).toISOString() : undefined })}
+                          className={`bg-base-700 border rounded px-1.5 py-0.5 text-xs font-mono text-text-primary outline-none focus:border-partner/50 transition-colors ${video.deliveredAt ? 'border-partner/40 text-partner-light' : 'border-base-500'}`}
+                        />
+                      </div>
+                    </div>
+                  ))}
+
+                  <button
+                    onClick={addDrillVideo}
+                    className="w-full flex items-center justify-center gap-1.5 py-1.5 text-xs text-text-muted hover:text-text-secondary bg-base-600 hover:bg-base-500 rounded-lg border border-dashed border-base-500 hover:border-base-400 transition-colors"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
+                    </svg>
+                    Add Drill Video
+                  </button>
+
+                  {/* Progress bar */}
+                  {(editableContact.partnerDetails.drillVideoLinks || []).length > 0 && (
+                    <div className="h-1.5 bg-base-600 rounded-full overflow-hidden">
                       <div
                         className="h-full rounded-full transition-all"
                         style={{
-                          width: `${Math.min(100, Math.round((editableContact.partnerDetails.drillVideosDelivered / editableContact.partnerDetails.drillVideosAgreed) * 100))}%`,
-                          background: editableContact.partnerDetails.drillVideosDelivered >= editableContact.partnerDetails.drillVideosAgreed ? '#10B981' : '#F59E0B',
+                          width: `${Math.min(100, Math.round(
+                            ((editableContact.partnerDetails.drillVideoLinks || []).filter(v => v.deliveredAt).length /
+                            (editableContact.partnerDetails.drillVideoLinks || []).length) * 100
+                          ))}%`,
+                          background: (editableContact.partnerDetails.drillVideoLinks || []).filter(v => v.deliveredAt).length >= (editableContact.partnerDetails.drillVideoLinks || []).length ? '#10B981' : '#F59E0B',
                         }}
-                      />
-                    </div>
-                  )}
-                  {editableContact.partnerDetails.drillVideosAgreed > 0 && editableContact.partnerDetails.drillVideosDelivered < editableContact.partnerDetails.drillVideosAgreed && (
-                    <div className="flex items-center gap-2 mt-2">
-                      <label className="text-xs text-text-muted flex-shrink-0">Due date:</label>
-                      <input
-                        type="date"
-                        value={editableContact.partnerDetails.drillVideosDueDate ? editableContact.partnerDetails.drillVideosDueDate.split('T')[0] : ''}
-                        onChange={e => handlePartnerDetailChange('drillVideosDueDate', e.target.value ? new Date(e.target.value).toISOString() : '')}
-                        className={`flex-1 bg-base-600 border rounded px-2 py-1 text-xs font-mono text-text-primary outline-none focus:border-partner/50 transition-colors ${editableContact.partnerDetails.drillVideosDueDate && new Date(editableContact.partnerDetails.drillVideosDueDate) < new Date() ? 'border-red-500/50 text-red-400' : 'border-base-500'}`}
                       />
                     </div>
                   )}

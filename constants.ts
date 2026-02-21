@@ -7,6 +7,7 @@ export const DEFAULT_PIPELINE_STAGES = [
   'Responded',
   'Meeting Booked',
   'On Hold',
+  'Sent Product; Awaiting Feedback',
   'Closed - Success',
   'Closed - Unsuccessful',
 ];

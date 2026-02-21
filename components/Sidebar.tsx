@@ -1,6 +1,6 @@
 
-import React from 'react';
-import { Contact, View, getTrack, PartnershipType } from '../types';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { Contact, View, PartnershipType } from '../types';
 
 interface SidebarProps {
   currentView: View;
@@ -9,6 +9,7 @@ interface SidebarProps {
   onNewContact: () => void;
   onImport: () => void;
   onExport: () => void;
+  onSelectContact?: (contact: Contact) => void;
   unrepliedCount?: number;
 }
 
@@ -34,6 +35,12 @@ const IconHandshake = () => (
 const IconShoppingBag = () => (
   <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
     <path strokeLinecap="round" strokeLinejoin="round" d="M16 11V7a4 4 0 00-8 0v4M5 9h14l1 12H4L5 9z" />
+  </svg>
+);
+
+const IconUsers = () => (
+  <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
   </svg>
 );
 
@@ -83,6 +90,12 @@ const IconUpload = () => (
 const IconDownload = () => (
   <svg xmlns="http://www.w3.org/2000/svg" className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
     <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+  </svg>
+);
+
+const IconSearch = () => (
+  <svg xmlns="http://www.w3.org/2000/svg" className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
   </svg>
 );
 
@@ -140,10 +153,77 @@ const SectionLabel: React.FC<{ children: React.ReactNode }> = ({ children }) => 
 
 const Divider = () => <div className="border-t border-base-600 my-2 mx-3" />;
 
-export const Sidebar: React.FC<SidebarProps> = ({ currentView, onViewChange, contacts, onNewContact, onImport, onExport, unrepliedCount = 0 }) => {
-  const outreachCount = contacts.filter(c => c.pipelineStage !== 'Closed - Success').length;
-  const partnerCount = contacts.filter(c => c.pipelineStage === 'Closed - Success' && c.partnershipType === PartnershipType.PARTNER).length;
-  const soldCount = contacts.filter(c => c.pipelineStage === 'Closed - Success' && c.partnershipType === PartnershipType.SALE).length;
+const CONTACT_TYPE_LABELS: Record<string, string> = {
+  instructor: 'Instructor',
+  media: 'Media',
+  customer: 'Customer',
+  other: 'Other',
+};
+
+export const Sidebar: React.FC<SidebarProps> = ({
+  currentView, onViewChange, contacts, onNewContact, onImport, onExport,
+  onSelectContact, unrepliedCount = 0,
+}) => {
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchFocused, setSearchFocused] = useState(false);
+  const searchRef = useRef<HTMLDivElement>(null);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [debouncedQuery, setDebouncedQuery] = useState('');
+
+  // Debounce search
+  useEffect(() => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => setDebouncedQuery(searchQuery), 300);
+    return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
+  }, [searchQuery]);
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (searchRef.current && !searchRef.current.contains(e.target as Node)) {
+        setSearchFocused(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const searchResults = useMemo(() => {
+    if (!debouncedQuery.trim()) return [];
+    const q = debouncedQuery.toLowerCase();
+    return contacts
+      .filter(c =>
+        c.name.toLowerCase().includes(q) ||
+        c.email.toLowerCase().includes(q) ||
+        (c.instagramHandle || '').toLowerCase().includes(q) ||
+        (c.location || '').toLowerCase().includes(q) ||
+        (c.notes || '').toLowerCase().includes(q) ||
+        (c.tags || []).some(t => t.toLowerCase().includes(q)) ||
+        (c.additionalEmails || []).some(e => e.toLowerCase().includes(q))
+      )
+      .slice(0, 8);
+  }, [debouncedQuery, contacts]);
+
+  const showDropdown = searchFocused && debouncedQuery.trim().length > 0;
+
+  // Track counts (new logic)
+  const prospectiveTeachersCount = contacts.filter(c =>
+    c.contactType === 'instructor' &&
+    !c.partnershipType &&
+    c.pipelineStage !== 'Sent Product; Awaiting Feedback'
+  ).length;
+
+  const peopleWithProductCount = contacts.filter(c =>
+    c.partnershipType === PartnershipType.PARTNER ||
+    c.partnershipType === PartnershipType.SALE ||
+    c.pipelineStage === 'Sent Product; Awaiting Feedback'
+  ).length;
+
+  const otherCount = contacts.filter(c =>
+    c.contactType !== 'instructor' &&
+    !c.partnershipType &&
+    c.pipelineStage !== 'Sent Product; Awaiting Feedback'
+  ).length;
 
   return (
     <div className="sidebar-fixed bg-base-800 border-r border-base-600 flex flex-col">
@@ -159,6 +239,77 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentView, onViewChange, con
             <div className="text-sm font-bold text-text-primary leading-none">PathPal CRM</div>
             <div className="text-xs text-text-muted mt-0.5">Founder Sales</div>
           </div>
+        </div>
+      </div>
+
+      {/* Global Search */}
+      <div className="px-3 py-3 border-b border-base-600" ref={searchRef}>
+        <div className="relative">
+          <div className="flex items-center gap-2 bg-base-700 border border-base-600 rounded-lg px-3 py-2 focus-within:border-outreach/50 transition-colors">
+            <span className="text-text-muted flex-shrink-0"><IconSearch /></span>
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+              onFocus={() => setSearchFocused(true)}
+              onKeyDown={e => {
+                if (e.key === 'Escape') { setSearchFocused(false); setSearchQuery(''); }
+                if (e.key === 'Enter' && searchResults.length > 0) {
+                  onSelectContact?.(searchResults[0]);
+                  setSearchFocused(false);
+                  setSearchQuery('');
+                }
+              }}
+              placeholder="Search contacts…"
+              className="flex-1 bg-transparent text-sm text-text-primary placeholder-text-muted outline-none min-w-0"
+            />
+            {searchQuery && (
+              <button
+                onClick={() => { setSearchQuery(''); setDebouncedQuery(''); }}
+                className="text-text-muted hover:text-text-secondary flex-shrink-0 text-lg leading-none"
+              >
+                ×
+              </button>
+            )}
+          </div>
+
+          {/* Search dropdown */}
+          {showDropdown && (
+            <div className="absolute top-full left-0 right-0 mt-1 bg-base-700 border border-base-600 rounded-lg shadow-xl z-50 overflow-hidden">
+              {searchResults.length === 0 ? (
+                <div className="px-3 py-3 text-xs text-text-muted text-center">No contacts found</div>
+              ) : (
+                searchResults.map(contact => (
+                  <button
+                    key={contact.id}
+                    onClick={() => {
+                      onSelectContact?.(contact);
+                      setSearchFocused(false);
+                      setSearchQuery('');
+                    }}
+                    className="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-base-600 transition-colors text-left"
+                  >
+                    <img
+                      src={contact.avatarUrl}
+                      alt={contact.name}
+                      className="w-7 h-7 rounded-full object-cover flex-shrink-0"
+                    />
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium text-text-primary truncate">{contact.name}</span>
+                        {contact.stopFollowUp && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-base-600 text-text-muted">paused</span>
+                        )}
+                      </div>
+                      <div className="text-xs text-text-muted truncate">
+                        {CONTACT_TYPE_LABELS[contact.contactType || 'other'] || 'Other'} · {contact.pipelineStage}
+                      </div>
+                    </div>
+                  </button>
+                ))
+              )}
+            </div>
+          )}
         </div>
       </div>
 
@@ -181,11 +332,11 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentView, onViewChange, con
 
         <NavItem
           icon={<IconArrowUp />}
-          label="Net New Outreach"
+          label="Prospective Teachers"
           view="outreach"
           currentView={currentView}
           onViewChange={onViewChange}
-          badge={outreachCount}
+          badge={prospectiveTeachersCount}
           accentColor="#6366F1"
           activeColor="text-outreach-light"
           activeBg="bg-outreach-dim"
@@ -193,26 +344,26 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentView, onViewChange, con
 
         <NavItem
           icon={<IconHandshake />}
-          label="Active Partners"
+          label="People with the Product"
           view="partners"
           currentView={currentView}
           onViewChange={onViewChange}
-          badge={partnerCount}
+          badge={peopleWithProductCount}
           accentColor="#10B981"
           activeColor="text-partner-light"
           activeBg="bg-partner-dim"
         />
 
         <NavItem
-          icon={<IconShoppingBag />}
-          label="Sold / Customers"
-          view="sold"
+          icon={<IconUsers />}
+          label="Other"
+          view="other"
           currentView={currentView}
           onViewChange={onViewChange}
-          badge={soldCount}
-          accentColor="#F59E0B"
-          activeColor="text-sold-light"
-          activeBg="bg-sold-dim"
+          badge={otherCount}
+          accentColor="#6B7280"
+          activeColor="text-gray-300"
+          activeBg="bg-gray-800/50"
         />
 
         <SectionLabel>Tools</SectionLabel>

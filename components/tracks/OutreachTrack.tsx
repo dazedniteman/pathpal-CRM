@@ -1,6 +1,7 @@
 
 import React, { useState, useMemo } from 'react';
-import { Contact, EmailDraft, getOutreachBucket, OutreachBucket, calculateHealthScore, getHealthLevel, daysSince, ContactSequence } from '../../types';
+import { Contact, EmailDraft, OutreachBucket, calculateHealthScore, getHealthLevel, daysSince, ContactSequence, Sequence } from '../../types';
+import { PriorityBanner } from './PriorityBanner';
 
 interface OutreachTrackProps {
   contacts: Contact[];
@@ -8,6 +9,7 @@ interface OutreachTrackProps {
   onComposeEmail: (draft: Partial<EmailDraft>, contact?: Contact) => void;
   onBatchOutreach?: (contacts: Contact[]) => void;
   contactEnrollments?: ContactSequence[];
+  sequences?: Sequence[];
 }
 
 const BUCKETS: { id: OutreachBucket; label: string; stage: string; color: string; description: string }[] = [
@@ -156,8 +158,8 @@ const ContactCard: React.FC<{
   );
 };
 
-export const OutreachTrack: React.FC<OutreachTrackProps> = ({ contacts, onContactClick, onComposeEmail, onBatchOutreach, contactEnrollments = [] }) => {
-  const [activeBucket, setActiveBucket] = useState<OutreachBucket>('to_contact');
+export const OutreachTrack: React.FC<OutreachTrackProps> = ({ contacts, onContactClick, onComposeEmail, onBatchOutreach, contactEnrollments = [], sequences = [] }) => {
+  const [activeBucket, setActiveBucket] = useState<OutreachBucket>('in_conversation');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -188,10 +190,28 @@ export const OutreachTrack: React.FC<OutreachTrackProps> = ({ contacts, onContac
     setSelectedIds(new Set(bucketContacts.map(c => c.id)));
   };
 
-  // Only outreach contacts (not Closed - Success)
+  // Prospective Teachers = instructors not yet in the product track
   const outreachContacts = useMemo(() =>
-    contacts.filter(c => c.pipelineStage !== 'Closed - Success'),
+    contacts.filter(c =>
+      c.contactType === 'instructor' &&
+      !c.partnershipType &&
+      c.pipelineStage !== 'Sent Product; Awaiting Feedback' &&
+      !c.stopFollowUp
+    ),
     [contacts]
+  );
+
+  // Warm leads: actively engaged instructors (needs attention NOW)
+  const warmLeads = useMemo(() =>
+    outreachContacts.filter(c =>
+      c.pipelineStage === 'Responded' || c.pipelineStage === 'Meeting Booked'
+    ).sort((a, b) => {
+      // Meeting Booked first, then by last contacted
+      if (a.pipelineStage === 'Meeting Booked' && b.pipelineStage !== 'Meeting Booked') return -1;
+      if (b.pipelineStage === 'Meeting Booked' && a.pipelineStage !== 'Meeting Booked') return 1;
+      return new Date(b.lastContacted).getTime() - new Date(a.lastContacted).getTime();
+    }),
+    [outreachContacts]
   );
 
   const bucketContacts = useMemo(() => {
@@ -213,10 +233,11 @@ export const OutreachTrack: React.FC<OutreachTrackProps> = ({ contacts, onContac
       {/* Track Header */}
       <div className="px-6 py-5 border-b border-base-600" style={{ borderLeft: '3px solid #6366F1' }}>
         <div className="flex items-center gap-3 mb-1">
-          <h1 className="text-xl font-bold text-text-primary">Net New Outreach</h1>
+          <h1 className="text-xl font-bold text-text-primary">Prospective Teachers</h1>
           <span className="font-mono text-sm font-semibold px-2 py-0.5 rounded-full bg-outreach-dim text-outreach-light">
             {outreachContacts.length}
           </span>
+          <span className="text-xs px-2 py-0.5 rounded-full bg-base-700 text-text-muted border border-base-600">Instructors only</span>
           <div className="ml-auto flex items-center gap-2">
             {selectionMode ? (
               <>
@@ -248,8 +269,49 @@ export const OutreachTrack: React.FC<OutreachTrackProps> = ({ contacts, onContac
             )}
           </div>
         </div>
-        <p className="text-sm text-text-muted">People you haven't partnered with yet — manage your outreach pipeline</p>
+        <p className="text-sm text-text-muted">Golf instructors you're building a relationship with — manage and nurture your pipeline</p>
       </div>
+
+      {/* Warm Leads Section — shown when there are active leads */}
+      {warmLeads.length > 0 && (
+        <div className="px-6 py-3 bg-amber-950/30 border-b border-amber-500/20">
+          <div className="flex items-center gap-2 mb-2">
+            <span className="text-xs font-semibold text-amber-400 uppercase tracking-wide">🔥 Warm Leads — Need Attention</span>
+            <span className="text-xs font-mono text-amber-500/70">{warmLeads.length}</span>
+          </div>
+          <div className="flex gap-2 overflow-x-auto pb-1">
+            {warmLeads.map(c => {
+              const score = calculateHealthScore(c);
+              const level = getHealthLevel(score);
+              const colors = { warm: '#10B981', cooling: '#F59E0B', cold: '#EF4444' };
+              const dayCount = daysSince(c.lastContacted);
+              return (
+                <button
+                  key={c.id}
+                  onClick={() => onContactClick(c)}
+                  className="flex-shrink-0 flex items-center gap-2 px-3 py-2 bg-base-800 hover:bg-base-700 border border-amber-500/20 hover:border-amber-500/40 rounded-lg transition-all text-left"
+                >
+                  <span className="inline-block w-2 h-2 rounded-full flex-shrink-0" style={{ background: colors[level] }} />
+                  <div>
+                    <div className="text-xs font-semibold text-text-primary whitespace-nowrap">{c.name}</div>
+                    <div className="text-xs text-text-muted whitespace-nowrap">
+                      {c.pipelineStage === 'Meeting Booked' ? '📅 Meeting' : '💬 Responded'} · {dayCount === 9999 ? 'never' : `${dayCount}d ago`}
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Priority Banner */}
+      <PriorityBanner
+        contacts={outreachContacts}
+        contactEnrollments={contactEnrollments}
+        sequences={sequences}
+        onContactClick={onContactClick}
+      />
 
       {/* Sub-bucket Tabs */}
       <div className="flex items-center gap-1 px-6 py-3 border-b border-base-600 overflow-x-auto">

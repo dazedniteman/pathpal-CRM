@@ -15,6 +15,40 @@ const SCOPES = [
   'https://www.googleapis.com/auth/gmail.modify',
 ].join(' ');
 
+const STORAGE_KEY = 'crm_gmail_token';
+
+interface StoredToken {
+  access_token: string;
+  expires_at: number; // Unix ms
+  email: string;
+  name: string;
+  picture: string;
+}
+
+function saveToken(tokenResponse: any, profile: { email: string; name: string; picture: string }) {
+  const stored: StoredToken = {
+    access_token: tokenResponse.access_token,
+    expires_at: Date.now() + (tokenResponse.expires_in ?? 3600) * 1000,
+    email: profile.email,
+    name: profile.name,
+    picture: profile.picture,
+  };
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(stored));
+}
+
+function loadToken(): StoredToken | null {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    const stored: StoredToken = JSON.parse(raw);
+    // Expire if less than 2 minutes remain
+    if (stored.expires_at - Date.now() < 2 * 60 * 1000) return null;
+    return stored;
+  } catch {
+    return null;
+  }
+}
+
 let tokenClient: any = null;
 let onAuthChangeCallback: ((authState: GoogleAuthState) => void) | null = null;
 let gapiInitialized = false;
@@ -44,6 +78,18 @@ async function initializeGapiClient() {
   try {
     await window.gapi.client.init({ discoveryDocs: ["https://www.googleapis.com/discovery/v1/apis/gmail/v1/rest"] });
     gapiInitialized = true;
+
+    // Restore persisted token so user stays logged in across page reloads
+    const stored = loadToken();
+    if (stored) {
+      window.gapi.client.setToken({ access_token: stored.access_token });
+      currentAccessToken = stored.access_token;
+      onAuthChangeCallback?.({
+        isAuthenticated: true,
+        profile: { email: stored.email, name: stored.name, picture: stored.picture },
+      });
+    }
+
     initializeGisClient();
   } catch (error) { console.error("Error initializing GAPI client:", error); }
 }
@@ -63,7 +109,10 @@ function initializeGisClient() {
             try {
               const userInfoResponse = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', { headers: { 'Authorization': `Bearer ${tokenResponse.access_token}` } });
               const profile = await userInfoResponse.json();
-              if (userInfoResponse.ok) { onAuthChangeCallback?.({ isAuthenticated: true, profile }); }
+              if (userInfoResponse.ok) {
+                saveToken(tokenResponse, profile);
+                onAuthChangeCallback?.({ isAuthenticated: true, profile });
+              }
               else { console.error("Error fetching user profile:", profile); signOut(); }
             } catch (error) { console.error("Error fetching user profile", error); onAuthChangeCallback?.({ isAuthenticated: false }); }
           },
@@ -74,10 +123,16 @@ function initializeGisClient() {
   checkGisReady();
 }
 
-export const signIn = () => {
+export const signIn = (forceAccount = false) => {
   if (!CLIENT_ID) { alert("Please configure your Google Client ID in the Settings page before connecting."); return; }
   if (!gapiInitialized) { alert("Google API client is not ready. Please try again in a moment."); return; }
-  if (tokenClient) { tokenClient.requestAccessToken({ prompt: 'select_account' }); }
+  if (tokenClient) {
+    // Silent re-auth if we have a stored email (returning user, no popup)
+    const stored = loadToken();
+    const prompt = forceAccount || !stored ? 'select_account' : '';
+    const hint = stored ? stored.email : undefined;
+    tokenClient.requestAccessToken({ prompt, login_hint: hint });
+  }
   else { console.error("Token client is not initialized."); alert("Gmail integration is not ready yet. Please wait a moment and try again."); }
 };
 
@@ -89,7 +144,7 @@ export const signOut = () => {
   }
   currentAccessToken = null;
   onAuthChangeCallback?.({ isAuthenticated: false });
-  localStorage.removeItem('crm_gmail_auth');
+  localStorage.removeItem(STORAGE_KEY);
 };
 
 function getAuthToken(): string | null {
@@ -479,4 +534,174 @@ export const getContactsNeedingEmailReply = (
 export const getGoogleAuthState = (): boolean => {
   const token = window.gapi?.client?.getToken();
   return !!(token && token.access_token);
+};
+
+// --- Bulk Gmail sync (180+ days) ---
+
+export interface BulkSyncMatchedContact {
+  contactId: string;
+  newInteractions: Interaction[];
+}
+
+export interface PendingContact {
+  fromEmail: string;
+  fromName?: string;
+  subject: string;
+  date: string;
+  snippet: string;
+  gmailMessageId?: string;
+  gmailThreadId?: string;
+}
+
+export interface BulkSyncResult {
+  matched: BulkSyncMatchedContact[];
+  pending: PendingContact[];
+  totalScanned: number;
+}
+
+export const bulkSyncAllEmails = async (
+  contacts: Contact[],
+  dayLookback: number = 180,
+  onProgress?: (processed: number, total: number, phase: string) => void
+): Promise<BulkSyncResult> => {
+  const token = getAuthToken();
+  if (!token) return { matched: [], pending: [], totalScanned: 0 };
+
+  const sinceDate = new Date();
+  sinceDate.setDate(sinceDate.getDate() - dayLookback);
+  // Gmail date filter uses epoch seconds
+  const afterEpoch = Math.floor(sinceDate.getTime() / 1000);
+
+  // Build email → contactId map (covers primary + additional emails)
+  const emailToContactId = new Map<string, string>();
+  for (const c of contacts) {
+    emailToContactId.set(c.email.toLowerCase().trim(), c.id);
+    for (const e of c.additionalEmails || []) {
+      emailToContactId.set(e.toLowerCase().trim(), c.id);
+    }
+  }
+
+  // Track existing messageIds per contact to skip already-synced emails
+  const existingMsgIds = new Map<string, Set<string>>();
+  for (const c of contacts) {
+    existingMsgIds.set(c.id, new Set(
+      c.interactions.filter(i => i.gmailMessageId).map(i => i.gmailMessageId!)
+    ));
+  }
+
+  const matchedMap = new Map<string, Interaction[]>();
+  const seenMessageIds = new Set<string>();
+  const pendingMap = new Map<string, PendingContact>(); // fromEmail → PendingContact
+
+  const total = contacts.length;
+  let processed = 0;
+
+  // Process in batches of 3 to respect Gmail API rate limits
+  for (let i = 0; i < contacts.length; i += 3) {
+    const batch = contacts.slice(i, Math.min(i + 3, contacts.length));
+
+    await Promise.all(batch.map(async (contact) => {
+      const allEmails = [contact.email, ...(contact.additionalEmails || [])].filter(Boolean);
+      const emailQuery = allEmails.map(e => `(from:${e} OR to:${e})`).join(' OR ');
+      const q = `${emailQuery} after:${afterEpoch}`;
+
+      try {
+        const listRes = await window.gapi.client.gmail.users.messages.list({
+          userId: 'me',
+          q,
+          maxResults: 50,
+        });
+        const messages: { id: string }[] = listRes.result.messages || [];
+
+        const existingIds = existingMsgIds.get(contact.id) || new Set<string>();
+        const newMessages = messages.filter(m => !seenMessageIds.has(m.id) && !existingIds.has(m.id));
+        newMessages.forEach(m => seenMessageIds.add(m.id));
+
+        if (newMessages.length === 0) return;
+
+        // Fetch full message content in sub-batches of 5
+        const newInteractions: Interaction[] = [];
+        for (let j = 0; j < Math.min(newMessages.length, 30); j += 5) {
+          const subBatch = newMessages.slice(j, j + 5);
+          const results = await Promise.all(
+            subBatch.map(msg => window.gapi.client.gmail.users.messages.get({
+              userId: 'me',
+              id: msg.id,
+              format: 'full',
+            }))
+          );
+
+          for (const res of results) {
+            const msgData = res.result;
+            const headers: any[] = msgData.payload?.headers || [];
+            const subject = headers.find((h: any) => h.name.toLowerCase() === 'subject')?.value || 'No Subject';
+            const from = headers.find((h: any) => h.name.toLowerCase() === 'from')?.value || '';
+            const to = headers.find((h: any) => h.name.toLowerCase() === 'to')?.value || '';
+            const body = extractEmailBody(msgData.payload);
+            const isFromContact = allEmails.some(e => from.toLowerCase().includes(e.toLowerCase()));
+
+            newInteractions.push({
+              id: `gmail-${msgData.id}`,
+              type: InteractionType.EMAIL,
+              date: new Date(parseInt(msgData.internalDate)).toISOString(),
+              notes: `Subject: ${subject}\n\n${msgData.snippet || ''}`,
+              outcome: 'Synced from Gmail',
+              gmailMessageId: msgData.id,
+              gmailThreadId: msgData.threadId,
+              emailSubject: subject,
+              emailFrom: from,
+              emailTo: to,
+              emailBody: body,
+              isSentByUser: !isFromContact,
+            });
+
+            // Check if the from address is an unknown contact (collect for pending)
+            if (!isFromContact) {
+              // Extract raw email from "Name <email>" format
+              const fromEmailMatch = from.match(/<([^>]+)>/) || from.match(/([^\s]+@[^\s]+)/);
+              const fromEmailClean = fromEmailMatch?.[1]?.toLowerCase()?.trim() || from.toLowerCase().trim();
+              const fromNameMatch = from.match(/^([^<]+)</) ;
+              const fromName = fromNameMatch?.[1]?.trim();
+
+              if (fromEmailClean && fromEmailClean.includes('@') && !emailToContactId.has(fromEmailClean)) {
+                if (!pendingMap.has(fromEmailClean)) {
+                  pendingMap.set(fromEmailClean, {
+                    fromEmail: fromEmailClean,
+                    fromName,
+                    subject,
+                    date: new Date(parseInt(msgData.internalDate)).toISOString(),
+                    snippet: msgData.snippet || '',
+                    gmailMessageId: msgData.id,
+                    gmailThreadId: msgData.threadId,
+                  });
+                }
+              }
+            }
+          }
+        }
+
+        if (newInteractions.length > 0) {
+          const existing = matchedMap.get(contact.id) || [];
+          matchedMap.set(contact.id, [...existing, ...newInteractions]);
+        }
+      } catch (error: any) {
+        console.error(`Bulk sync error for ${contact.email}:`, error);
+        if (error.status === 401 || error.code === 401) signOut();
+      }
+
+      processed++;
+      onProgress?.(processed, total, 'syncing');
+    }));
+
+    // Brief pause between batches to avoid rate limits
+    if (i + 3 < contacts.length) {
+      await new Promise(resolve => setTimeout(resolve, 300));
+    }
+  }
+
+  return {
+    matched: Array.from(matchedMap.entries()).map(([contactId, newInteractions]) => ({ contactId, newInteractions })),
+    pending: Array.from(pendingMap.values()),
+    totalScanned: seenMessageIds.size,
+  };
 };

@@ -7,6 +7,7 @@ interface ContactTimelineProps {
   tasks: Task[];
   onReply?: (interaction: Interaction) => void;
   onTaskUpdate?: (task: Task) => void;
+  onSummarizeEmail?: (body: string) => Promise<string>;
 }
 
 const TypeIcon: React.FC<{ type: InteractionType }> = ({ type }) => {
@@ -40,14 +41,31 @@ interface TimelineEntry {
   task?: Task;
 }
 
-export const ContactTimeline: React.FC<ContactTimelineProps> = ({ interactions, tasks, onReply, onTaskUpdate }) => {
+export const ContactTimeline: React.FC<ContactTimelineProps> = ({ interactions, tasks, onReply, onTaskUpdate, onSummarizeEmail }) => {
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
+  const [emailSummaries, setEmailSummaries] = useState<Record<string, string>>({});
+  const [loadingSummaries, setLoadingSummaries] = useState<Set<string>>(new Set());
 
   const toggle = (id: string) => setExpandedIds(prev => {
     const next = new Set(prev);
     if (next.has(id)) next.delete(id); else next.add(id);
     return next;
   });
+
+  const handleSummarize = async (id: string, body: string) => {
+    if (!onSummarizeEmail || emailSummaries[id] || loadingSummaries.has(id)) return;
+    setLoadingSummaries(prev => new Set([...prev, id]));
+    try {
+      const summary = await onSummarizeEmail(body);
+      if (summary) setEmailSummaries(prev => ({ ...prev, [id]: summary }));
+    } finally {
+      setLoadingSummaries(prev => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    }
+  };
 
   const entries: TimelineEntry[] = [
     ...interactions.map(i => ({ id: i.id, date: i.date, kind: 'interaction' as const, interaction: i })),
@@ -144,6 +162,32 @@ export const ContactTimeline: React.FC<ContactTimelineProps> = ({ interactions, 
 
                 {i.emailSubject && (
                   <div className="text-sm font-medium text-text-primary mb-1 truncate">{i.emailSubject}</div>
+                )}
+
+                {/* AI one-liner summary */}
+                {hasBody && (
+                  <div className="mb-1">
+                    {emailSummaries[i.id] ? (
+                      <span className="inline-flex items-center gap-1 text-xs text-text-muted italic">
+                        <svg xmlns="http://www.w3.org/2000/svg" className="w-3 h-3 text-outreach-light flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M5 3l14 9-14 9V3z" />
+                        </svg>
+                        {emailSummaries[i.id]}
+                      </span>
+                    ) : loadingSummaries.has(i.id) ? (
+                      <span className="text-xs text-text-muted italic animate-pulse">Summarizing…</span>
+                    ) : onSummarizeEmail ? (
+                      <button
+                        onClick={() => handleSummarize(i.id, i.emailBody!)}
+                        className="inline-flex items-center gap-1 text-xs text-text-muted hover:text-outreach-light transition-colors"
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+                        </svg>
+                        Summarize
+                      </button>
+                    ) : null}
+                  </div>
                 )}
 
                 {/* Body or notes */}

@@ -204,6 +204,22 @@ export const deleteProduct = async (productId: string): Promise<void> => {
     handleSupabaseError(error, 'deleteProduct');
 };
 
+// --- PRODUCT IMAGE UPLOAD (Supabase Storage) ---
+// Bucket name: 'product-images' — must be created in Supabase Dashboard > Storage
+export const uploadProductImage = async (file: File, productId: string): Promise<string> => {
+    const ext = file.name.split('.').pop() || 'jpg';
+    const path = `${productId}/${Date.now()}.${ext}`;
+
+    const { error: uploadError } = await supabase.storage
+        .from('product-images')
+        .upload(path, file, { upsert: true, contentType: file.type });
+
+    if (uploadError) throw new Error(`Upload failed: ${uploadError.message}`);
+
+    const { data } = supabase.storage.from('product-images').getPublicUrl(path);
+    return data.publicUrl;
+};
+
 // --- CONTACT PRODUCTS API ---
 export const getContactProducts = async (contactId: string): Promise<ContactProduct[]> => {
     const { data, error } = await supabase

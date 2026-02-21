@@ -85,6 +85,59 @@ Subject: [subject line]
   }
 };
 
+export const summarizeEmail = async (
+  emailBody: string,
+  model: string = 'gemini-3-flash-preview'
+): Promise<string> => {
+  if (!apiKey) return '';
+
+  const prompt = `Summarize the following email in ONE concise sentence (max 20 words). Focus on the key action, request, or topic only. No preamble.
+
+${emailBody.substring(0, 2000)}`;
+
+  try {
+    const response = await ai.models.generateContent({ model, contents: prompt });
+    return (response.text || '').trim().replace(/^["'`]+|["'`]+$/g, '').replace(/\.$/, '');
+  } catch {
+    return '';
+  }
+};
+
+export const getRelationshipSummary = async (
+  contact: Contact,
+  model: string = 'gemini-3-flash-preview'
+): Promise<string> => {
+  if (!apiKey) return 'API key not configured.';
+
+  const recentInteractions = contact.interactions
+    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+    .slice(0, 15)
+    .map(i => {
+      const dir = i.isSentByUser ? 'You → Them' : i.isSentByUser === false ? 'Them → You' : '';
+      const preview = (i.notes || '').substring(0, 200);
+      return `${new Date(i.date).toLocaleDateString()}: [${i.type}]${dir ? ' ' + dir : ''}: "${preview}"`;
+    }).join('\n');
+
+  const prompt = `Analyze the relationship between Steven (PathPal Golf) and ${contact.name} (${contact.contactType || 'contact'}).
+
+Contact:
+- Stage: ${contact.pipelineStage}
+- Partnership: ${contact.partnershipType || 'none yet'}
+- Notes: ${(contact.richNotes || contact.notes || 'none').substring(0, 300)}
+
+Recent interactions (newest first):
+${recentInteractions || 'No interactions logged.'}
+
+Write 3-4 flowing sentences covering: (1) where the relationship stands now, (2) the overall engagement tone, (3) the single best next action. No bullet points. Be direct and specific.`;
+
+  try {
+    const response = await ai.models.generateContent({ model, contents: prompt });
+    return (response.text || '').trim();
+  } catch {
+    return 'Unable to generate relationship summary.';
+  }
+};
+
 export const generateEmailDraft = async (
   context: string,
   model: string = 'gemini-3-flash-preview'

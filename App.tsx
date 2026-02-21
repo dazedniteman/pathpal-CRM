@@ -16,8 +16,8 @@ import { NewContactModal } from './components/NewContactModal';
 import { Auth } from './components/Auth';
 import { EmailCompose } from './components/EmailCompose';
 import { OutreachTrack } from './components/tracks/OutreachTrack';
-import { PartnersTrack } from './components/tracks/PartnersTrack';
-import { CustomersTrack } from './components/tracks/CustomersTrack';
+import { PeopleWithProductTrack } from './components/tracks/PeopleWithProductTrack';
+import { OtherTrack } from './components/tracks/OtherTrack';
 import { ProductLibrary } from './components/ProductLibrary';
 import { EmailTemplateLibrary } from './components/EmailTemplateLibrary';
 import { BatchOutreachModal } from './components/BatchOutreachModal';
@@ -33,7 +33,9 @@ import {
   initGmailService, signIn, signOut, fetchEmailsForContact,
   fetchEmailsForContactWithBodies, fetchEmailAliases, sendEmail,
   getContactsNeedingEmailReply, UnrepliedEmail,
+  bulkSyncAllEmails, PendingContact,
 } from './services/gmailService';
+import { PendingContactsModal } from './components/PendingContactsModal';
 import * as db from './services/dataService';
 
 const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
@@ -68,6 +70,12 @@ const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
   // Morning briefing state
   const [unrepliedEmails, setUnrepliedEmails] = useState<UnrepliedEmail[]>([]);
   const [isSyncingGmail, setIsSyncingGmail] = useState(false);
+
+  // Bulk Gmail sync state
+  const [isBulkSyncing, setIsBulkSyncing] = useState(false);
+  const [pendingContacts, setPendingContacts] = useState<PendingContact[]>([]);
+  const [isPendingModalOpen, setIsPendingModalOpen] = useState(false);
+  const [bulkSyncProgress, setBulkSyncProgress] = useState<{ processed: number; total: number } | null>(null);
 
   // Phase 2 state
   const [products, setProducts] = useState<Product[]>([]);
@@ -305,6 +313,62 @@ const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
       setContacts([...updatedContacts]);
     } finally {
       setIsSyncingGmail(false);
+    }
+  }, [googleAuthState.isAuthenticated, contacts]);
+
+  // Bulk Gmail sync (180 days, all contacts)
+  const handleBulkGmailSync = useCallback(async () => {
+    if (!googleAuthState.isAuthenticated) {
+      alert('Please connect to Gmail first.');
+      return;
+    }
+    if (!window.confirm('This will scan your last 180 days of Gmail against all contacts. This may take a few minutes. Continue?')) return;
+
+    setIsBulkSyncing(true);
+    setBulkSyncProgress({ processed: 0, total: contacts.length });
+    try {
+      const result = await bulkSyncAllEmails(
+        contacts,
+        180,
+        (processed, total) => setBulkSyncProgress({ processed, total })
+      );
+
+      // Apply matched interactions to contacts
+      if (result.matched.length > 0) {
+        const updatedContacts = [...contacts];
+        for (const { contactId, newInteractions } of result.matched) {
+          const idx = updatedContacts.findIndex(c => c.id === contactId);
+          if (idx === -1) continue;
+          const contact = updatedContacts[idx];
+          const existingIds = new Set(contact.interactions.map(i => i.id));
+          const trulyNew = newInteractions.filter(i => !existingIds.has(i.id));
+          if (trulyNew.length === 0) continue;
+          const merged = [...trulyNew, ...contact.interactions].sort(
+            (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()
+          );
+          const updatedContact = await db.updateContact({
+            ...contact,
+            interactions: merged,
+            lastContacted: merged[0].date,
+          });
+          updatedContacts[idx] = updatedContact;
+        }
+        setContacts(updatedContacts);
+      }
+
+      // Show pending contacts modal if there are unmatched senders
+      if (result.pending.length > 0) {
+        setPendingContacts(result.pending);
+        setIsPendingModalOpen(true);
+      } else {
+        alert(`Bulk sync complete! Synced ${result.matched.length} contacts. No unknown senders found.`);
+      }
+    } catch (err) {
+      console.error('Bulk sync error:', err);
+      alert('Bulk sync failed. Please try again.');
+    } finally {
+      setIsBulkSyncing(false);
+      setBulkSyncProgress(null);
     }
   }, [googleAuthState.isAuthenticated, contacts]);
 
@@ -646,6 +710,8 @@ const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
             onComposeEmail={handleComposeEmail}
             onViewChange={(v) => setView(v as View)}
             onSyncGmail={handleGlobalGmailSync}
+            onBulkSyncGmail={handleBulkGmailSync}
+            isBulkSyncing={isBulkSyncing}
             onTaskUpdate={handleTaskUpdate}
             sequences={sequences}
             enrollments={allEnrollments}
@@ -660,22 +726,37 @@ const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
             onComposeEmail={handleComposeEmail}
             onBatchOutreach={handleBatchOutreach}
             contactEnrollments={allEnrollments}
+            sequences={sequences}
           />
         );
       case 'partners':
         return (
-          <PartnersTrack
+          <PeopleWithProductTrack
             contacts={contacts}
             onContactClick={setSelectedContact}
             onComposeEmail={handleComposeEmail}
+            contactEnrollments={allEnrollments}
+            sequences={sequences}
           />
         );
-      case 'sold':
+      case 'other':
         return (
-          <CustomersTrack
+          <OtherTrack
             contacts={contacts}
             onContactClick={setSelectedContact}
             onComposeEmail={handleComposeEmail}
+            contactEnrollments={allEnrollments}
+            sequences={sequences}
+          />
+        );
+      case 'sold': // legacy — redirect to partners
+        return (
+          <PeopleWithProductTrack
+            contacts={contacts}
+            onContactClick={setSelectedContact}
+            onComposeEmail={handleComposeEmail}
+            contactEnrollments={allEnrollments}
+            sequences={sequences}
           />
         );
       case 'kanban':
@@ -747,6 +828,7 @@ const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
         onNewContact={() => setNewContactModalOpen(true)}
         onImport={() => setImportModalOpen(true)}
         onExport={handleExport}
+        onSelectContact={setSelectedContact}
         unrepliedCount={unrepliedEmails.length}
       />
 
@@ -837,6 +919,61 @@ const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
           supabaseUserId={session.user.id}
           onSend={handleBatchSent}
           onClose={() => { setIsBatchOutreachOpen(false); setBatchOutreachContacts([]); }}
+        />
+      )}
+
+      {/* Bulk sync progress overlay */}
+      {isBulkSyncing && bulkSyncProgress && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 backdrop-blur-sm">
+          <div className="bg-base-800 border border-base-600 rounded-2xl shadow-2xl p-8 text-center max-w-sm w-full mx-4">
+            <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-outreach mx-auto mb-4" />
+            <h3 className="text-lg font-bold text-text-primary mb-1">Bulk Gmail Sync</h3>
+            <p className="text-sm text-text-muted mb-4">
+              Scanning the last 180 days for {contacts.length} contacts…
+            </p>
+            <div className="w-full bg-base-700 rounded-full h-2 overflow-hidden mb-2">
+              <div
+                className="h-full rounded-full bg-outreach transition-all duration-300"
+                style={{ width: `${Math.round((bulkSyncProgress.processed / bulkSyncProgress.total) * 100)}%` }}
+              />
+            </div>
+            <p className="text-xs font-mono text-text-muted">
+              {bulkSyncProgress.processed} / {bulkSyncProgress.total} contacts
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Pending contacts modal */}
+      {isPendingModalOpen && (
+        <PendingContactsModal
+          pendingContacts={pendingContacts}
+          contacts={contacts}
+          onAddAsNew={(pending) => {
+            // Pre-fill a new contact with data from the pending email
+            // For now, open new contact modal — TODO: pre-fill fields
+            setNewContactModalOpen(true);
+          }}
+          onAssignToExisting={(pending, contactId) => {
+            const contact = contacts.find(c => c.id === contactId);
+            if (contact) {
+              const newEmails = [...(contact.additionalEmails || [])];
+              if (!newEmails.includes(pending.fromEmail)) {
+                newEmails.push(pending.fromEmail);
+                db.updateContact({ ...contact, additionalEmails: newEmails }).then(updated => {
+                  setContacts(prev => prev.map(c => c.id === updated.id ? updated : c));
+                });
+              }
+            }
+          }}
+          onIgnore={(email) => {
+            setPendingContacts(prev => prev.filter(p => p.fromEmail !== email));
+          }}
+          onIgnoreAll={() => {
+            setPendingContacts([]);
+            setIsPendingModalOpen(false);
+          }}
+          onClose={() => setIsPendingModalOpen(false)}
         />
       )}
     </div>

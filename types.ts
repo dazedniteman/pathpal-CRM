@@ -36,7 +36,7 @@ export interface PartnerDetails {
   continueFollowUp: boolean;
   drillVideosAgreed: number;
   drillVideosDelivered: number;
-  drillVideoLinks: string[];
+  drillVideoLinks: DrillVideoLink[];
   drillVideosDueDate?: string;       // ISO date
   testimonialVideoAgreed: boolean;
   testimonialVideoDelivered: boolean;
@@ -52,7 +52,13 @@ export interface PartnerDetails {
   socialPostDueDate?: string;        // ISO date
 }
 
-export type ContactType = 'instructor' | 'media' | 'other';
+export type ContactType = 'instructor' | 'media' | 'customer' | 'other';
+
+export interface DrillVideoLink {
+  url: string;
+  title?: string;
+  deliveredAt?: string;
+}
 export type Track = 'outreach' | 'partner' | 'sold';
 export type OutreachBucket = 'to_contact' | 'awaiting_response' | 'in_conversation' | 'meeting_booked' | 'on_hold' | 'closed';
 export type HealthLevel = 'warm' | 'cooling' | 'cold';
@@ -73,6 +79,8 @@ export interface Contact {
   richNotes?: string;
   contactType?: ContactType;
   healthScore?: number;
+  additionalEmails?: string[];
+  stopFollowUp?: boolean;
   avatarUrl: string;
   website?: string;
   posts?: number;
@@ -94,7 +102,7 @@ export interface Task {
   contactId?: string;
 }
 
-export type View = 'dashboard' | 'kanban' | 'analytics' | 'table' | 'settings' | 'tasks' | 'outreach' | 'partners' | 'sold' | 'products' | 'templates' | 'sequences';
+export type View = 'dashboard' | 'kanban' | 'analytics' | 'table' | 'settings' | 'tasks' | 'outreach' | 'partners' | 'sold' | 'products' | 'templates' | 'sequences' | 'other';
 
 export type TableFilterType =
   | 'outstanding_drills'
