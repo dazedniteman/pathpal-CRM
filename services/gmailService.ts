@@ -53,6 +53,23 @@ let tokenClient: any = null;
 let onAuthChangeCallback: ((authState: GoogleAuthState) => void) | null = null;
 let gapiInitialized = false;
 let currentAccessToken: string | null = null;
+let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+
+function silentRefreshToken(email: string) {
+  if (!tokenClient) return;
+  tokenClient.requestAccessToken({ prompt: '', login_hint: email });
+}
+
+function scheduleTokenRefresh(stored: StoredToken) {
+  if (refreshTimer) clearTimeout(refreshTimer);
+  const msUntilRefresh = stored.expires_at - Date.now() - 5 * 60 * 1000; // refresh 5 min before expiry
+  if (msUntilRefresh <= 0) {
+    // Already close to expiry — attempt silent refresh now (tokenClient may not be ready yet; it's a no-op if not)
+    silentRefreshToken(stored.email);
+    return;
+  }
+  refreshTimer = setTimeout(() => silentRefreshToken(stored.email), msUntilRefresh);
+}
 
 export const initGmailService = (clientId: string | undefined, onAuthChange: (authState: GoogleAuthState) => void) => {
   if (clientId === CLIENT_ID) return;
@@ -84,6 +101,7 @@ async function initializeGapiClient() {
     if (stored) {
       window.gapi.client.setToken({ access_token: stored.access_token });
       currentAccessToken = stored.access_token;
+      scheduleTokenRefresh(stored); // silently refresh before expiry
       onAuthChangeCallback?.({
         isAuthenticated: true,
         profile: { email: stored.email, name: stored.name, picture: stored.picture },
@@ -111,6 +129,8 @@ function initializeGisClient() {
               const profile = await userInfoResponse.json();
               if (userInfoResponse.ok) {
                 saveToken(tokenResponse, profile);
+                const freshStored = loadToken();
+                if (freshStored) scheduleTokenRefresh(freshStored); // schedule next refresh
                 onAuthChangeCallback?.({ isAuthenticated: true, profile });
               }
               else { console.error("Error fetching user profile:", profile); signOut(); }
@@ -148,6 +168,23 @@ export const signOut = () => {
 };
 
 function getAuthToken(): string | null {
+  // Check stored expiry — detect if token expired mid-session
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) {
+      const stored: StoredToken = JSON.parse(raw);
+      if (stored.expires_at - Date.now() < 30 * 1000) {
+        // Expired (or expiring in <30s) — clear and signal disconnect, then attempt silent refresh
+        localStorage.removeItem(STORAGE_KEY);
+        window.gapi?.client?.setToken(null);
+        currentAccessToken = null;
+        onAuthChangeCallback?.({ isAuthenticated: false });
+        silentRefreshToken(stored.email);
+        return null;
+      }
+    }
+  } catch { /* ignore */ }
+
   const token = window.gapi?.client?.getToken();
   return token?.access_token || currentAccessToken;
 }
@@ -450,6 +487,11 @@ export const sendEmail = async (
     if (!res.ok) {
       const err = await res.json();
       console.error('Send email error:', err);
+      if (res.status === 401) {
+        signOut();
+        signIn(); // attempt silent re-auth with stored email hint
+        return { success: false, error: 'Gmail session expired. Reconnecting automatically — please try again in a moment.' };
+      }
       return { success: false, error: err.error?.message || 'Failed to send email' };
     }
 
