@@ -273,13 +273,18 @@ export const fetchEmailsForContact = async (contactEmail: string): Promise<{ id:
 };
 
 // --- NEW: Fetch emails with full body content ---
-export const fetchEmailsForContactWithBodies = async (contactEmail: string): Promise<Interaction[]> => {
+export const fetchEmailsForContactWithBodies = async (
+  contactEmail: string,
+  additionalEmails?: string[]
+): Promise<Interaction[]> => {
   const token = getAuthToken();
   if (!token) { console.warn("Not authenticated"); return []; }
+  const allEmails = [contactEmail, ...(additionalEmails || [])].filter(Boolean);
+  const emailQuery = allEmails.map(e => `from:${e} OR to:${e}`).join(' OR ');
   try {
     const listRes = await window.gapi.client.gmail.users.messages.list({
       userId: 'me',
-      q: `from:${contactEmail} OR to:${contactEmail}`,
+      q: emailQuery,
       maxResults: 30,
     });
     const messages = listRes.result.messages || [];
@@ -310,7 +315,7 @@ export const fetchEmailsForContactWithBodies = async (contactEmail: string): Pro
         const from = headers.find((h: any) => h.name.toLowerCase() === 'from')?.value || '';
         const to = headers.find((h: any) => h.name.toLowerCase() === 'to')?.value || '';
         const body = extractEmailBody(msg.payload);
-        const isFromContact = from.toLowerCase().includes(contactEmail.toLowerCase());
+        const isFromContact = allEmails.some(e => from.toLowerCase().includes(e.toLowerCase()));
 
         interactions.push({
           id: `gmail-${msg.id}`,

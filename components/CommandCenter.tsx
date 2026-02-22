@@ -77,21 +77,18 @@ const EmailReplyItem: React.FC<{
   onContactClick: (c: Contact) => void;
   onReply: (item: UnrepliedEmail) => void;
 }> = ({ item, onContactClick, onReply }) => (
-  <div className="flex items-start gap-3 px-4 py-3 hover:bg-base-700 transition-colors group">
+  <div
+    className="flex items-start gap-3 px-4 py-3 hover:bg-base-700 transition-colors group cursor-pointer"
+    onClick={() => onContactClick(item.contact)}
+  >
     <img
       src={item.contact.avatarUrl}
       alt={item.contact.name}
-      className="w-8 h-8 rounded-full flex-shrink-0 mt-0.5 cursor-pointer"
-      onClick={() => onContactClick(item.contact)}
+      className="w-8 h-8 rounded-full flex-shrink-0 mt-0.5"
     />
     <div className="flex-1 min-w-0">
       <div className="flex items-baseline justify-between gap-2">
-        <button
-          onClick={() => onContactClick(item.contact)}
-          className="text-sm font-semibold text-text-primary hover:text-outreach-light transition-colors truncate"
-        >
-          {item.contact.name}
-        </button>
+        <span className="text-sm font-semibold text-text-primary truncate">{item.contact.name}</span>
         <span className="text-xs text-text-muted flex-shrink-0 font-mono">{formatTimeAgo(item.date)}</span>
       </div>
       <p className="text-xs text-text-secondary truncate">{item.subject}</p>
@@ -100,7 +97,7 @@ const EmailReplyItem: React.FC<{
       )}
     </div>
     <button
-      onClick={() => onReply(item)}
+      onClick={(e) => { e.stopPropagation(); onReply(item); }}
       className="opacity-0 group-hover:opacity-100 flex-shrink-0 flex items-center gap-1 px-2 py-1 rounded-lg bg-outreach-dim text-outreach-light text-xs font-medium transition-all hover:bg-outreach/20"
     >
       <svg xmlns="http://www.w3.org/2000/svg" className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>

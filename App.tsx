@@ -234,13 +234,21 @@ const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
       contactDataToUpdate.pipelineStage = 'Contacted';
     }
 
+    // Auto-set next follow-up date when user sends an outbound email
+    if (interaction.isSentByUser && interaction.type === InteractionType.EMAIL) {
+      const days = settings.defaultFollowUpDays || 30;
+      const followUpDate = new Date();
+      followUpDate.setDate(followUpDate.getDate() + days);
+      contactDataToUpdate.nextFollowUpDate = followUpDate.toISOString().split('T')[0];
+    }
+
     const updatedContact = await db.updateContact({ ...contactToUpdate, ...contactDataToUpdate });
 
     setContacts(prev => prev.map(c => (c.id === contactId ? updatedContact : c)));
     if (selectedContact?.id === contactId) {
       setSelectedContact(updatedContact);
     }
-  }, [contacts, selectedContact]);
+  }, [contacts, selectedContact, settings.defaultFollowUpDays]);
 
   // Per-contact Gmail sync (used from ContactModal)
   const handleSyncGmail = useCallback(async (contact: Contact) => {
@@ -248,22 +256,24 @@ const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
       alert("Please connect to Gmail in Settings first.");
       return;
     }
-    const emails = await fetchEmailsForContactWithBodies(contact.email);
+    const emails = await fetchEmailsForContactWithBodies(contact.email, contact.additionalEmails);
     if (emails.length === 0) {
       alert("No new emails found for this contact.");
       return;
     }
 
     const existingIds = new Set(contact.interactions.map(i => i.id));
-    const newInteractions = emails.filter(e => !existingIds.has(e.id));
+    const existingMsgIds = new Set(contact.interactions.filter(i => i.gmailMessageId).map(i => i.gmailMessageId!));
+    const newInteractions = emails.filter(e => !existingIds.has(e.id) && !(e.gmailMessageId && existingMsgIds.has(e.gmailMessageId)));
 
     if (newInteractions.length === 0) {
       alert("No new emails found for this contact.");
       return;
     }
 
+    const allContactEmails = [contact.email, ...(contact.additionalEmails || [])].map(e => e.toLowerCase());
     const hasReply = newInteractions.some(i => !i.isSentByUser &&
-      i.emailFrom?.toLowerCase().includes(contact.email.toLowerCase()));
+      allContactEmails.some(e => i.emailFrom?.toLowerCase().includes(e)));
 
     let updatedContactData: Partial<Contact> = {
       interactions: [...newInteractions, ...contact.interactions],
@@ -399,9 +409,21 @@ const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
         setContacts(updatedContacts);
       }
 
+      // Also do an inbox-wide scan to catch unknown senders not related to any contact
+      const bulkSinceDate = new Date();
+      bulkSinceDate.setDate(bulkSinceDate.getDate() - 180);
+      const broadScan = await syncEmailsSinceDate(contacts, bulkSinceDate);
+
+      // Merge pending from both scans (deduplicate by email)
+      const mergedPendingMap = new Map<string, PendingContact>();
+      for (const p of [...result.pending, ...broadScan.pending]) {
+        if (!mergedPendingMap.has(p.fromEmail)) mergedPendingMap.set(p.fromEmail, p);
+      }
+      const allPending = Array.from(mergedPendingMap.values());
+
       // Show pending contacts modal if there are unmatched senders
-      if (result.pending.length > 0) {
-        setPendingContacts(result.pending);
+      if (allPending.length > 0) {
+        setPendingContacts(allPending);
         setIsPendingModalOpen(true);
       } else {
         alert(`Bulk sync complete! Synced emails for ${result.matched.length} contacts. No unknown senders found.`);

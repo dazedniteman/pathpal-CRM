@@ -123,6 +123,7 @@ export const ContactModal: React.FC<ContactModalProps> = ({
   const [newTaskTitle, setNewTaskTitle] = useState('');
   const [newTaskDueDate, setNewTaskDueDate] = useState('');
   const [isDirty, setIsDirty] = useState(false);
+  const [showUnsavedDialog, setShowUnsavedDialog] = useState(false);
   const [newEmailInput, setNewEmailInput] = useState('');
   const [relationshipSummary, setRelationshipSummary] = useState('');
   const [isLoadingRelSummary, setIsLoadingRelSummary] = useState(false);
@@ -216,15 +217,58 @@ export const ContactModal: React.FC<ContactModalProps> = ({
   const handleSummarizeEmail = (body: string) =>
     summarizeEmail(body, settings.defaultAiModel);
 
+  // Compute a human-readable list of changed fields
+  const getChangedFields = (): Array<{ label: string; from: string; to: string }> => {
+    const fields: Array<{ key: keyof Contact; label: string; format?: (v: any) => string }> = [
+      { key: 'name', label: 'Name' },
+      { key: 'email', label: 'Email' },
+      { key: 'phone', label: 'Phone' },
+      { key: 'location', label: 'Location' },
+      { key: 'pipelineStage', label: 'Pipeline Stage' },
+      { key: 'contactType', label: 'Contact Type' },
+      { key: 'nextFollowUpDate', label: 'Next Follow-up', format: (v) => v ? new Date(v).toLocaleDateString() : 'None' },
+      { key: 'stopFollowUp', label: 'Stop Follow-up', format: (v) => v ? 'Yes' : 'No' },
+      { key: 'notes', label: 'Notes' },
+      { key: 'followers', label: 'Followers', format: (v) => v?.toLocaleString() ?? '' },
+      { key: 'instagramHandle', label: 'Instagram' },
+      { key: 'website', label: 'Website' },
+    ];
+    const changes: Array<{ label: string; from: string; to: string }> = [];
+    for (const { key, label, format } of fields) {
+      const orig = format ? format(contact[key]) : String(contact[key] ?? '');
+      const edited = format ? format(editableContact[key]) : String(editableContact[key] ?? '');
+      if (orig !== edited) changes.push({ label, from: orig || '(empty)', to: edited || '(empty)' });
+    }
+    // Tags
+    const origTags = (contact.tags || []).join(', ') || '(none)';
+    const editedTags = (editableContact.tags || []).join(', ') || '(none)';
+    if (origTags !== editedTags) changes.push({ label: 'Tags', from: origTags, to: editedTags });
+    // Additional emails
+    const origEmails = (contact.additionalEmails || []).join(', ') || '(none)';
+    const editedEmails = (editableContact.additionalEmails || []).join(', ') || '(none)';
+    if (origEmails !== editedEmails) changes.push({ label: 'Additional Emails', from: origEmails, to: editedEmails });
+    return changes;
+  };
+
   const handleClose = () => {
     if (isDirty) {
-      if (window.confirm("You have unsaved changes. Discard them?")) onClose();
+      setShowUnsavedDialog(true);
     } else {
       onClose();
     }
   };
 
-  const handleSave = () => onUpdate(editableContact);
+  const handleSave = (andClose = false) => {
+    onUpdate(editableContact);
+    setShowUnsavedDialog(false);
+    if (andClose) onClose();
+  };
+
+  // Auto-save before composing email if there are unsaved changes
+  const handleComposeEmailSafe = (draft: Parameters<NonNullable<typeof onComposeEmail>>[0], c?: Contact) => {
+    if (isDirty) onUpdate(editableContact);
+    onComposeEmail?.(draft, c ?? contact);
+  };
 
   const handleGmailSync = async () => {
     setIsSyncing(true);
@@ -259,7 +303,7 @@ export const ContactModal: React.FC<ContactModalProps> = ({
     const subjectLine = lines.find(l => l.toLowerCase().startsWith('subject:'));
     const subject = subjectLine ? subjectLine.replace(/^subject:\s*/i, '') : 'Follow-up';
     const body = lines.filter(l => !l.toLowerCase().startsWith('subject:')).join('\n').trim();
-    onComposeEmail({ to: contact.email, subject, body, alias: '' }, contact);
+    handleComposeEmailSafe({ to: contact.email, subject, body, alias: '' }, contact);
   };
 
   // Quick-set follow-up date helpers
@@ -817,7 +861,7 @@ export const ContactModal: React.FC<ContactModalProps> = ({
       {/* Compose email button */}
       {onComposeEmail && (
         <button
-          onClick={() => onComposeEmail({ to: contact.email, alias: '' }, contact)}
+          onClick={() => handleComposeEmailSafe({ to: contact.email, alias: '' }, contact)}
           className="w-full flex items-center justify-center gap-2 py-2 text-sm font-medium text-outreach-light bg-outreach-dim border border-outreach/30 hover:bg-outreach/20 rounded-lg transition-colors"
         >
           <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -910,7 +954,7 @@ export const ContactModal: React.FC<ContactModalProps> = ({
             <ContactTimeline
               interactions={contact.interactions}
               tasks={tasks}
-              onReply={onComposeEmail ? (i) => onComposeEmail({
+              onReply={onComposeEmail ? (i) => handleComposeEmailSafe({
                 to: contact.email,
                 alias: '',
                 subject: i.emailSubject ? `Re: ${i.emailSubject}` : '',
@@ -1232,7 +1276,7 @@ export const ContactModal: React.FC<ContactModalProps> = ({
             Cancel
           </button>
           <button
-            onClick={handleSave}
+            onClick={() => handleSave()}
             disabled={!isDirty}
             className="px-4 py-2 text-sm font-medium text-white bg-outreach hover:bg-outreach-light rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
           >
@@ -1240,6 +1284,55 @@ export const ContactModal: React.FC<ContactModalProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Unsaved changes dialog */}
+      {showUnsavedDialog && (() => {
+        const changes = getChangedFields();
+        return (
+          <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[60] backdrop-blur-sm" onClick={() => setShowUnsavedDialog(false)}>
+            <div className="bg-base-800 border border-base-600 rounded-2xl shadow-2xl w-full max-w-md mx-4 p-6" onClick={e => e.stopPropagation()}>
+              <h3 className="text-base font-bold text-text-primary mb-1">Unsaved Changes</h3>
+              <p className="text-xs text-text-muted mb-4">The following fields were edited but not saved:</p>
+              {changes.length > 0 ? (
+                <div className="space-y-2 mb-5 max-h-56 overflow-y-auto">
+                  {changes.map(({ label, from, to }) => (
+                    <div key={label} className="bg-base-700 rounded-lg px-3 py-2">
+                      <p className="text-xs font-semibold text-text-secondary mb-1">{label}</p>
+                      <div className="flex items-start gap-2 text-xs">
+                        <span className="text-red-400 line-through truncate flex-1">{from}</span>
+                        <span className="text-text-muted flex-shrink-0">→</span>
+                        <span className="text-partner-light truncate flex-1">{to}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-xs text-text-muted mb-5 italic">Complex field changes (partnership details, etc.)</p>
+              )}
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setShowUnsavedDialog(false)}
+                  className="flex-1 px-3 py-2 text-sm font-medium text-text-secondary bg-base-600 hover:bg-base-500 rounded-lg transition-colors"
+                >
+                  Go Back
+                </button>
+                <button
+                  onClick={() => { setShowUnsavedDialog(false); onClose(); }}
+                  className="flex-1 px-3 py-2 text-sm font-medium text-red-400 bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 rounded-lg transition-colors"
+                >
+                  Discard
+                </button>
+                <button
+                  onClick={() => handleSave(true)}
+                  className="flex-1 px-3 py-2 text-sm font-medium text-white bg-outreach hover:bg-outreach-light rounded-lg transition-colors"
+                >
+                  Save & Close
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 };

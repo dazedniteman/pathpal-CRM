@@ -61,7 +61,7 @@ export const PendingContactsModal: React.FC<PendingContactsModalProps> = ({
     }
   };
 
-  const resolvedCount = Object.values(itemStates).filter(s => s.action !== 'none').length;
+  const resolvedCount = Object.values(itemStates).filter(s => s.action !== 'none' && s.action !== 'ignored').length;
 
   return (
     <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4 backdrop-blur-sm">
@@ -175,16 +175,10 @@ export const PendingContactsModal: React.FC<PendingContactsModalProps> = ({
                         </select>
                       </div>
 
-                      {/* Ignore */}
+                      {/* Ignore — immediate: adds to ignore list and removes from view */}
                       <button
-                        onClick={() => setItemState(pending.fromEmail, {
-                          action: state.action === 'ignored' ? 'none' : 'ignored'
-                        })}
-                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
-                          state.action === 'ignored'
-                            ? 'bg-red-500/10 border border-red-500/30 text-red-400'
-                            : 'bg-base-700 border border-base-600 text-text-muted hover:text-red-400 hover:border-red-500/20'
-                        }`}
+                        onClick={() => onIgnore(pending.fromEmail)}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all bg-base-700 border border-base-600 text-text-muted hover:text-red-400 hover:border-red-500/20"
                       >
                         <svg xmlns="http://www.w3.org/2000/svg" className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                           <path strokeLinecap="round" strokeLinejoin="round" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
