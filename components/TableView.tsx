@@ -12,11 +12,12 @@ interface TableViewProps {
   onBulkUpdate: (contactIds: string[], updates: Partial<Pick<Contact, 'pipelineStage' | 'tags'>>) => void;
 }
 
-type SortableContactKeys = 'name' | 'email' | 'pipelineStage' | 'location' | 'followers' | 'following' | 'posts' | 'lastContacted' | 'instagramHandle' | 'partnershipType';
+type SortableContactKeys = 'name' | 'email' | 'pipelineStage' | 'location' | 'followers' | 'following' | 'posts' | 'lastContacted' | 'instagramHandle' | 'partnershipType' | 'contactType' | 'createdAt';
 type SortConfig = { key: SortableContactKeys; direction: 'ascending' | 'descending'; } | null;
 
 const columnsConfig: { key: SortableContactKeys; label: string; defaultWidth: number; }[] = [
     { key: 'name', label: 'Name', defaultWidth: 250 },
+    { key: 'contactType', label: 'Type', defaultWidth: 110 },
     { key: 'pipelineStage', label: 'Stage', defaultWidth: 150 },
     { key: 'partnershipType', label: 'Deal Type', defaultWidth: 120 },
     { key: 'instagramHandle', label: 'Instagram', defaultWidth: 200 },
@@ -24,6 +25,7 @@ const columnsConfig: { key: SortableContactKeys; label: string; defaultWidth: nu
     { key: 'following', label: 'Following', defaultWidth: 100 },
     { key: 'posts', label: 'Posts', defaultWidth: 100 },
     { key: 'lastContacted', label: 'Last Contacted', defaultWidth: 150 },
+    { key: 'createdAt', label: 'Date Added', defaultWidth: 130 },
 ];
 
 const useSortableData = (items: Contact[], config: SortConfig = null) => {
@@ -52,7 +54,9 @@ export const TableView: React.FC<TableViewProps> = ({ contacts, pipelineStages, 
   const [filterStage, setFilterStage] = useState('all');
   const [filterDealType, setFilterDealType] = useState('all');
   const [filterTag, setFilterTag] = useState('all');
-  const [sortConfig, setSortConfig] = useState<SortConfig>({ key: 'lastContacted', direction: 'descending' });
+  const [filterContactType, setFilterContactType] = useState('all');
+  const [filterDateAdded, setFilterDateAdded] = useState('all'); // all | 7d | 30d | 90d
+  const [sortConfig, setSortConfig] = useState<SortConfig>({ key: 'createdAt', direction: 'descending' });
   const [selectedContactIds, setSelectedContactIds] = useState<string[]>([]);
   const [bulkStage, setBulkStage] = useState('');
   const [bulkTags, setBulkTags] = useState('');
@@ -117,14 +121,23 @@ export const TableView: React.FC<TableViewProps> = ({ contacts, pipelineStages, 
       })
     }
     
+    const dateThreshold = (() => {
+      if (filterDateAdded === '7d') return Date.now() - 7 * 86400000;
+      if (filterDateAdded === '30d') return Date.now() - 30 * 86400000;
+      if (filterDateAdded === '90d') return Date.now() - 90 * 86400000;
+      return null;
+    })();
+
     return filtered.filter(contact => {
       const matchesSearch = searchTerm === '' || contact.name.toLowerCase().includes(searchTerm.toLowerCase()) || contact.email.toLowerCase().includes(searchTerm.toLowerCase()) || contact.location?.toLowerCase().includes(searchTerm.toLowerCase());
       const matchesStage = filterStage === 'all' || contact.pipelineStage === filterStage;
       const matchesDealType = filterDealType === 'all' || (filterDealType === 'Sale' && contact.partnershipType === PartnershipType.SALE) || (filterDealType === 'Partner' && contact.partnershipType === PartnershipType.PARTNER) || (filterDealType === 'N/A' && !contact.partnershipType);
       const matchesTag = filterTag === 'all' || (contact.tags || []).includes(filterTag);
-      return matchesSearch && matchesStage && matchesDealType && matchesTag;
+      const matchesContactType = filterContactType === 'all' || contact.contactType === filterContactType;
+      const matchesDate = !dateThreshold || (contact.createdAt ? new Date(contact.createdAt).getTime() >= dateThreshold : false);
+      return matchesSearch && matchesStage && matchesDealType && matchesTag && matchesContactType && matchesDate;
     });
-  }, [contacts, searchTerm, filterStage, filterDealType, filterTag, activeFilter]);
+  }, [contacts, searchTerm, filterStage, filterDealType, filterTag, filterContactType, filterDateAdded, activeFilter]);
 
   const sortedContacts = useSortableData(filteredContacts, sortConfig);
   
@@ -163,11 +176,24 @@ export const TableView: React.FC<TableViewProps> = ({ contacts, pipelineStages, 
     <div className="bg-secondary p-6 rounded-lg shadow-lg">
       <h2 className="text-3xl font-bold text-white mb-6">All Contacts</h2>
       {activeFilter && ( <div className="flex items-center justify-between p-3 mb-4 bg-highlight/20 text-highlight rounded-md"> <p className="font-medium text-sm"><span className="font-bold">Active Filter:</span> {activeFilter.label}</p> <button onClick={onClearFilter} className="flex items-center space-x-1 text-xs hover:text-white"><XCircleIcon /><span>Clear Filter</span></button></div> )}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
-        <div className="relative md:col-span-1 lg:col-span-2">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 mb-4">
+        <div className="relative lg:col-span-2">
           <input type="text" placeholder="Search by name, email, location..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="w-full bg-accent p-2 pl-10 rounded-md text-white focus:ring-2 focus:ring-highlight outline-none" disabled={!!activeFilter} />
           <SearchIcon className="absolute left-3 top-1/2 -translate-y-1/2 h-5 w-5 text-text-secondary" />
         </div>
+        <select value={filterDateAdded} onChange={(e) => setFilterDateAdded(e.target.value)} className="bg-accent text-white rounded-md p-2 focus:ring-2 focus:ring-highlight outline-none" disabled={!!activeFilter}>
+          <option value="all">All Time</option>
+          <option value="7d">Added Last 7 Days</option>
+          <option value="30d">Added Last 30 Days</option>
+          <option value="90d">Added Last 90 Days</option>
+        </select>
+        <select value={filterContactType} onChange={(e) => setFilterContactType(e.target.value)} className="bg-accent text-white rounded-md p-2 focus:ring-2 focus:ring-highlight outline-none" disabled={!!activeFilter}>
+          <option value="all">All Types</option>
+          <option value="instructor">Instructor</option>
+          <option value="media">Media</option>
+          <option value="customer">Customer</option>
+          <option value="other">Other</option>
+        </select>
         <select value={filterStage} onChange={(e) => setFilterStage(e.target.value)} className="bg-accent text-white rounded-md p-2 focus:ring-2 focus:ring-highlight outline-none" disabled={!!activeFilter}><option value="all">All Pipeline Stages</option>{pipelineStages.map(stage => ( <option key={stage} value={stage}>{stage}</option> ))}</select>
         <select value={filterDealType} onChange={(e) => setFilterDealType(e.target.value)} className="bg-accent text-white rounded-md p-2 focus:ring-2 focus:ring-highlight outline-none" disabled={!!activeFilter}><option value="all">All Deal Types</option><option value="Sale">Sale</option><option value="Partner">Partner</option><option value="N/A">Not Applicable</option></select>
         <select value={filterTag} onChange={(e) => setFilterTag(e.target.value)} className="bg-accent text-white rounded-md p-2 focus:ring-2 focus:ring-highlight outline-none" disabled={!!activeFilter}><option value="all">All Tags</option>{allTags.map(tag => ( <option key={tag} value={tag}>{tag}</option> ))}</select>
@@ -207,6 +233,16 @@ export const TableView: React.FC<TableViewProps> = ({ contacts, pipelineStages, 
                     <div className="font-medium text-white whitespace-normal break-words">{contact.name}</div> 
                     <div className="text-xs text-text-secondary whitespace-normal break-words">{contact.email}</div> 
                 </td>
+                <td className="p-3 cursor-pointer" onClick={() => onSelectContact(contact)}>
+                  {contact.contactType ? (
+                    <span className={`px-2 py-0.5 text-xs rounded-full font-medium ${
+                      contact.contactType === 'instructor' ? 'bg-indigo-500/20 text-indigo-300' :
+                      contact.contactType === 'customer' ? 'bg-emerald-500/20 text-emerald-300' :
+                      contact.contactType === 'media' ? 'bg-sky-500/20 text-sky-300' :
+                      'bg-gray-500/20 text-gray-400'
+                    }`}>{contact.contactType}</span>
+                  ) : <span className="text-text-secondary text-xs">—</span>}
+                </td>
                 <td className="p-3 cursor-pointer" onClick={() => onSelectContact(contact)}><span className={`px-2 py-1 text-xs rounded-full ${ contact.pipelineStage === 'Closed - Success' ? 'bg-green-500/50 text-green-300' : contact.pipelineStage === 'Closed - Unsuccessful' ? 'bg-red-500/50 text-red-300' : 'bg-highlight/50 text-blue-300' }`}>{contact.pipelineStage}</span></td>
                 <td className="p-3 text-text-secondary cursor-pointer" onClick={() => onSelectContact(contact)}>{contact.partnershipType || 'N/A'}</td>
                 <td className="p-3 text-text-secondary cursor-pointer" onClick={() => onSelectContact(contact)}>{contact.instagramHandle ? (<a href={`https://instagram.com/${contact.instagramHandle.replace('@', '')}`} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} className="text-highlight hover:underline whitespace-normal break-all">{contact.instagramHandle}</a>) : 'N/A'}</td>
@@ -214,6 +250,7 @@ export const TableView: React.FC<TableViewProps> = ({ contacts, pipelineStages, 
                 <td className="p-3 text-text-secondary cursor-pointer" onClick={() => onSelectContact(contact)}>{contact.following?.toLocaleString() || 'N/A'}</td>
                 <td className="p-3 text-text-secondary cursor-pointer" onClick={() => onSelectContact(contact)}>{contact.posts?.toLocaleString() || 'N/A'}</td>
                 <td className="p-3 text-text-secondary cursor-pointer" onClick={() => onSelectContact(contact)}>{new Date(contact.lastContacted).toLocaleDateString()}</td>
+                <td className="p-3 text-text-secondary cursor-pointer" onClick={() => onSelectContact(contact)}>{contact.createdAt ? new Date(contact.createdAt).toLocaleDateString() : '—'}</td>
                 <td className="p-3 text-text-secondary text-xs cursor-pointer" onClick={() => onSelectContact(contact)}><div className="flex flex-wrap gap-1">{contact.tags?.map(tag => <span key={tag} className="px-1.5 py-0.5 text-xs text-blue-200 bg-highlight/50 rounded-full">{tag}</span>)}</div></td>
                 <td className="p-3 text-text-secondary text-xs cursor-pointer" onClick={() => onSelectContact(contact)}>{contact.partnerDetails ? ( <div className="space-y-1"><div>Contract: {contact.partnerDetails.contractSigned ? '✅' : '❌'}</div><div>Drills: {contact.partnerDetails.drillVideosDelivered}/{contact.partnerDetails.drillVideosAgreed}</div><div>Testimonial: {contact.partnerDetails.testimonialVideoDelivered ? '✅' : '❌'}</div></div> ) : 'N/A'}</td>
               </tr>

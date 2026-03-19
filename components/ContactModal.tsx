@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Contact, Interaction, InteractionType, AppSettings, PartnershipType, PartnerDetails, Task, EmailDraft, GmailAlias, ContactType, Product, ContactProduct, Sequence, ContactSequence, Project, ContactProject, DrillVideoLink, calculateHealthScore, getHealthLevel, daysSinceContact } from '../types';
 import { getFollowUpSuggestion, summarizeEmail, getRelationshipSummary } from '../services/geminiService';
 import { getSequenceProgress, getNextStep, getStepDueDate } from '../services/sequenceService';
@@ -123,12 +123,14 @@ export const ContactModal: React.FC<ContactModalProps> = ({
   const [newTaskTitle, setNewTaskTitle] = useState('');
   const [newTaskDueDate, setNewTaskDueDate] = useState('');
   const [isDirty, setIsDirty] = useState(false);
+  const lastSavedRef = useRef<Contact>(contact);
   const [showUnsavedDialog, setShowUnsavedDialog] = useState(false);
   const [newEmailInput, setNewEmailInput] = useState('');
   const [relationshipSummary, setRelationshipSummary] = useState('');
   const [isLoadingRelSummary, setIsLoadingRelSummary] = useState(false);
 
   useEffect(() => {
+    lastSavedRef.current = contact;
     setEditableContact(contact);
     setIsEditingDealType(false);
     setRelationshipSummary('');
@@ -148,8 +150,8 @@ export const ContactModal: React.FC<ContactModalProps> = ({
   }, [contact.id]);
 
   useEffect(() => {
-    setIsDirty(JSON.stringify(contact) !== JSON.stringify(editableContact));
-  }, [contact, editableContact]);
+    setIsDirty(JSON.stringify(lastSavedRef.current) !== JSON.stringify(editableContact));
+  }, [editableContact]);
 
   const handleUpdate = (updatedData: Partial<Contact>) => {
     setEditableContact(prev => ({ ...prev, ...updatedData }));
@@ -259,14 +261,30 @@ export const ContactModal: React.FC<ContactModalProps> = ({
   };
 
   const handleSave = (andClose = false) => {
-    onUpdate(editableContact);
+    // Always use contact.interactions from parent — it's the live source of truth.
+    // editableContact.interactions is a stale snapshot and won't include emails
+    // added via Gmail sync (which updates the parent state directly).
+    const toSave = { ...editableContact, interactions: contact.interactions };
+    onUpdate(toSave);
+    // Update lastSavedRef AND reset isDirty synchronously so that clicking X
+    // immediately after Save never triggers a false "unsaved changes" dialog.
+    // (The useEffect that normally resets isDirty is async and can fire too late.)
+    lastSavedRef.current = toSave;
+    setEditableContact(toSave);
+    setIsDirty(false);
     setShowUnsavedDialog(false);
     if (andClose) onClose();
   };
 
   // Auto-save before composing email if there are unsaved changes
   const handleComposeEmailSafe = (draft: Parameters<NonNullable<typeof onComposeEmail>>[0], c?: Contact) => {
-    if (isDirty) onUpdate(editableContact);
+    if (isDirty) {
+      const toSave = { ...editableContact, interactions: contact.interactions };
+      onUpdate(toSave);
+      lastSavedRef.current = toSave;
+      setEditableContact(toSave);
+      setIsDirty(false);
+    }
     onComposeEmail?.(draft, c ?? contact);
   };
 
@@ -496,18 +514,47 @@ export const ContactModal: React.FC<ContactModalProps> = ({
           { name: 'location' as const, label: 'Location (State)', type: 'text' },
           { name: 'website' as const, label: 'Website', type: 'url' },
           { name: 'instagramHandle' as const, label: 'Instagram Handle', type: 'text' },
-        ].map(f => (
-          <div key={f.name}>
-            <label className="text-xs text-text-muted">{f.label}</label>
-            <input
-              type={f.type}
-              name={f.name}
-              value={(editableContact[f.name] as string) || ''}
-              onChange={handleFieldChange}
-              className="w-full bg-base-700 border border-base-600 rounded-lg px-3 py-1.5 text-sm text-text-primary outline-none focus:border-outreach/50 mt-0.5"
-            />
-          </div>
-        ))}
+        ].map(f => {
+          const val = (editableContact[f.name] as string) || '';
+          const websiteHref = f.name === 'website' && val ? (val.startsWith('http') ? val : `https://${val}`) : null;
+          const instaHref = f.name === 'instagramHandle' && val ? `https://instagram.com/${val.replace('@', '')}` : null;
+          const linkHref = websiteHref || instaHref;
+          return (
+            <div key={f.name}>
+              <label className="text-xs text-text-muted">{f.label}</label>
+              <div className="flex items-center gap-1.5 mt-0.5">
+                <input
+                  type={f.type}
+                  name={f.name}
+                  value={val}
+                  onChange={handleFieldChange}
+                  className="flex-1 bg-base-700 border border-base-600 rounded-lg px-3 py-1.5 text-sm text-text-primary outline-none focus:border-outreach/50"
+                />
+                {linkHref && (
+                  <a
+                    href={linkHref}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title={f.name === 'instagramHandle' ? 'Open Instagram profile' : 'Open website'}
+                    className="flex-shrink-0 p-1.5 rounded-lg bg-base-700 border border-base-600 text-text-muted hover:text-outreach-light hover:border-outreach/40 transition-colors"
+                  >
+                    {f.name === 'instagramHandle' ? (
+                      <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <rect x="2" y="2" width="20" height="20" rx="5" ry="5" strokeLinecap="round" strokeLinejoin="round"/>
+                        <circle cx="12" cy="12" r="4" strokeLinecap="round" strokeLinejoin="round"/>
+                        <circle cx="17.5" cy="6.5" r="0.5" fill="currentColor"/>
+                      </svg>
+                    ) : (
+                      <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                      </svg>
+                    )}
+                  </a>
+                )}
+              </div>
+            </div>
+          );
+        })}
       </div>
 
       {/* Social stats */}

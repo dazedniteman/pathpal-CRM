@@ -1,5 +1,5 @@
 
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useRef } from 'react';
 import { Contact, Product, GmailAlias, Interaction, InteractionType, EmailTemplate } from '../types';
 import { getFollowUpSuggestion } from '../services/geminiService';
 import { sendEmail, saveEmailAsDraft, SendEmailOptions, generateTrackingToken, buildTrackingPixelUrl } from '../services/gmailService';
@@ -453,11 +453,24 @@ export const BatchOutreachModal: React.FC<BatchOutreachModalProps> = ({
     </div>
   );
 
+  // Track which contacts have their history expanded
+  const [expandedHistory, setExpandedHistory] = useState<Set<string>>(new Set());
+  const toggleHistory = (id: string) => setExpandedHistory(prev => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+
   const renderReviewStep = () => (
     <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
       {contacts.map(contact => {
         const d = drafts[contact.id];
         if (!d) return null;
+        const recentEmails = contact.interactions
+          .filter(i => i.type === InteractionType.EMAIL)
+          .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+          .slice(0, 5);
+        const historyOpen = expandedHistory.has(contact.id);
         return (
           <div
             key={contact.id}
@@ -531,6 +544,46 @@ export const BatchOutreachModal: React.FC<BatchOutreachModalProps> = ({
                     placeholder="Email body..."
                   />
                 </div>
+
+                {/* Inline email history — reference past correspondence while editing */}
+                {recentEmails.length > 0 && (
+                  <div className="border border-base-700 rounded-lg overflow-hidden">
+                    <button
+                      onClick={() => toggleHistory(contact.id)}
+                      className="w-full flex items-center justify-between px-3 py-2 text-xs text-text-muted hover:text-text-secondary bg-base-700/50 hover:bg-base-700 transition-colors"
+                    >
+                      <span className="flex items-center gap-1.5 font-medium uppercase tracking-wide">
+                        <svg xmlns="http://www.w3.org/2000/svg" className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                        </svg>
+                        Past Emails ({recentEmails.length})
+                      </span>
+                      <svg xmlns="http://www.w3.org/2000/svg" className={`w-3 h-3 transition-transform ${historyOpen ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                      </svg>
+                    </button>
+                    {historyOpen && (
+                      <div className="divide-y divide-base-700/50">
+                        {recentEmails.map(email => (
+                          <div key={email.id} className="px-3 py-2 bg-base-800/50">
+                            <div className="flex items-center gap-2 mb-1">
+                              <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${email.isSentByUser ? 'bg-outreach/20 text-outreach-light' : 'bg-base-600 text-text-muted'}`}>
+                                {email.isSentByUser ? 'Sent' : 'Received'}
+                              </span>
+                              <span className="text-xs text-text-secondary font-medium truncate">{email.emailSubject || email.notes?.split('\n')[0]?.replace('Subject: ', '') || 'Email'}</span>
+                              <span className="text-xs text-text-muted flex-shrink-0 font-mono ml-auto">{new Date(email.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>
+                            </div>
+                            {email.emailBody && (
+                              <p className="text-xs text-text-muted leading-relaxed line-clamp-3 whitespace-pre-wrap">
+                                {email.emailBody.substring(0, 300)}{email.emailBody.length > 300 ? '…' : ''}
+                              </p>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
           </div>

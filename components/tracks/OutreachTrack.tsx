@@ -5,10 +5,17 @@ import { PriorityBanner } from './PriorityBanner';
 
 type SortOption = 'priority' | 'followers' | 'recent' | 'name';
 
-// Priority score: followers size + state overlap with existing partners + tags
-function calcPriorityScore(contact: Contact, partnerLocations: string[]): number {
+const getState = (loc?: string) => loc?.split(',').pop()?.trim() || '';
+
+/**
+ * Priority score (0–100 pts).
+ * stateProductCount: Map<state, # of People-with-the-Product in that state>
+ * More product users in a state → higher social-proof → higher priority for prospects there.
+ */
+function calcPriorityScore(contact: Contact, stateProductCount: Map<string, number>): number {
   let score = 0;
-  // Followers (0–40 pts)
+
+  // --- Followers (0–40 pts) ---
   const f = contact.followers || 0;
   if (f >= 100_000) score += 40;
   else if (f >= 50_000) score += 30;
@@ -16,11 +23,18 @@ function calcPriorityScore(contact: Contact, partnerLocations: string[]): number
   else if (f >= 10_000) score += 15;
   else if (f >= 5_000) score += 10;
   else score += 4;
-  // State overlap with existing partners (+25 pts)
-  const getState = (loc?: string) => loc?.split(',').pop()?.trim() || '';
+
+  // --- State social-proof (0–30 pts, scaled by product-user count in that state) ---
   const contactState = getState(contact.location);
-  if (contactState && partnerLocations.includes(contactState)) score += 25;
-  // Engagement rate (avgLikes/followers) 0–20 pts
+  if (contactState) {
+    const count = stateProductCount.get(contactState) || 0;
+    if (count >= 10) score += 30;
+    else if (count >= 6)  score += 24;
+    else if (count >= 3)  score += 18;
+    else if (count >= 1)  score += 10;
+  }
+
+  // --- Engagement rate (avgLikes / followers) (0–20 pts) ---
   if (contact.avgLikes && contact.followers) {
     const er = contact.avgLikes / contact.followers;
     if (er >= 0.05) score += 20;
@@ -28,9 +42,11 @@ function calcPriorityScore(contact: Contact, partnerLocations: string[]): number
     else if (er >= 0.01) score += 8;
     else score += 3;
   }
-  // High-value tags 0–15 pts
+
+  // --- High-value tags (0–15 pts, 5 per tag) ---
   const highValue = ['Top Rated Teacher', 'PGA Pro', 'LPGA', 'Tour Player', 'Influencer'];
   score += (contact.tags || []).filter(t => highValue.includes(t)).length * 5;
+
   return score;
 }
 
@@ -259,12 +275,21 @@ export const OutreachTrack: React.FC<OutreachTrackProps> = ({ contacts, onContac
     [outreachContacts]
   );
 
-  // Partner locations for state-overlap scoring
-  const partnerLocations = useMemo(() => {
-    return contacts
-      .filter(c => c.partnershipType === PartnershipType.PARTNER)
-      .map(c => c.location?.split(',').pop()?.trim() || '')
-      .filter(Boolean);
+  // Count product users per state for social-proof scoring.
+  // Includes: confirmed partners (Partner/Sale) + contacts awaiting feedback (product sent).
+  const stateProductCount = useMemo(() => {
+    const map = new Map<string, number>();
+    contacts
+      .filter(c =>
+        c.partnershipType === PartnershipType.PARTNER ||
+        c.partnershipType === PartnershipType.SALE ||
+        c.pipelineStage === 'Sent Product; Awaiting Feedback'
+      )
+      .forEach(c => {
+        const state = getState(c.location);
+        if (state) map.set(state, (map.get(state) || 0) + 1);
+      });
+    return map;
   }, [contacts]);
 
   // All unique tags across outreach contacts
@@ -285,7 +310,7 @@ export const OutreachTrack: React.FC<OutreachTrackProps> = ({ contacts, onContac
       .sort((a, b) => {
         switch (sortBy) {
           case 'priority':
-            return calcPriorityScore(b, partnerLocations) - calcPriorityScore(a, partnerLocations);
+            return calcPriorityScore(b, stateProductCount) - calcPriorityScore(a, stateProductCount);
           case 'followers':
             return (b.followers || 0) - (a.followers || 0);
           case 'recent':
@@ -296,7 +321,7 @@ export const OutreachTrack: React.FC<OutreachTrackProps> = ({ contacts, onContac
             return 0;
         }
       });
-  }, [outreachContacts, activeBucket, searchQuery, locationFilter, tagFilter, sortBy, partnerLocations]);
+  }, [outreachContacts, activeBucket, searchQuery, locationFilter, tagFilter, sortBy, stateProductCount]);
 
   const getBucketCount = (bucket: typeof BUCKETS[0]) =>
     outreachContacts.filter(c => c.pipelineStage === bucket.stage).length;
@@ -467,6 +492,33 @@ export const OutreachTrack: React.FC<OutreachTrackProps> = ({ contacts, onContac
         <span className="text-xs text-text-muted ml-auto flex-shrink-0">{bucketContacts.length} shown</span>
       </div>
 
+      {/* Sticky selection banner — always visible at top when contacts are selected */}
+      {selectionMode && (
+        <div className={`flex items-center justify-between px-6 py-2.5 border-b transition-all flex-shrink-0 ${
+          selectedIds.size > 0
+            ? 'bg-outreach/10 border-outreach/30'
+            : 'bg-base-700/50 border-base-700'
+        }`}>
+          <span className={`text-sm font-medium ${selectedIds.size > 0 ? 'text-outreach-light' : 'text-text-muted'}`}>
+            {selectedIds.size === 0
+              ? 'Tap cards to select contacts for batch outreach'
+              : `${selectedIds.size} contact${selectedIds.size !== 1 ? 's' : ''} selected`
+            }
+          </span>
+          {selectedIds.size > 0 && (
+            <button
+              onClick={handleBatchDraft}
+              className="flex items-center gap-2 px-4 py-1.5 bg-outreach hover:bg-outreach-light text-white rounded-lg text-xs font-semibold transition-colors"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
+              </svg>
+              Draft {selectedIds.size} Email{selectedIds.size !== 1 ? 's' : ''} →
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Contact Grid */}
       <div className="flex-1 overflow-y-auto px-6 pb-6">
         {bucketContacts.length === 0 ? (
@@ -493,7 +545,7 @@ export const OutreachTrack: React.FC<OutreachTrackProps> = ({ contacts, onContac
                 isSelected={selectedIds.has(contact.id)}
                 onToggleSelect={toggleSelect}
                 hasActiveSequence={contactEnrollments.some(e => e.contactId === contact.id)}
-                priorityScore={calcPriorityScore(contact, partnerLocations)}
+                priorityScore={calcPriorityScore(contact, stateProductCount)}
                 showPriority={sortBy === 'priority'}
               />
             ))}

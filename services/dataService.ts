@@ -153,18 +153,27 @@ export const getSettings = async (): Promise<AppSettings | null> => {
     return data ? objectToCamel(data) : null;
 };
 
-export const saveSettings = async (settings: AppSettings): Promise<AppSettings> => {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) throw new Error("User not authenticated");
+export const saveSettings = async (settings: AppSettings, _retryCount = 0): Promise<AppSettings> => {
+    try {
+        const { data: { user } } = await supabase.auth.getUser();
+        if (!user) throw new Error("User not authenticated");
 
-    const settingsWithUser = { ...settings, userId: user.id };
-    const { data, error } = await supabase
-        .from('settings')
-        .upsert(objectToSnake(settingsWithUser))
-        .select()
-        .single();
-    handleSupabaseError(error, 'saveSettings');
-    return objectToCamel(data);
+        const settingsWithUser = { ...settings, userId: user.id };
+        const { data, error } = await supabase
+            .from('settings')
+            .upsert(objectToSnake(settingsWithUser))
+            .select()
+            .single();
+        handleSupabaseError(error, 'saveSettings');
+        return objectToCamel(data);
+    } catch (error: any) {
+        // Supabase auth uses navigator.locks internally — retry up to 3 times if the lock times out
+        if (error?.name === 'NavigatorLockAcquireTimeoutError' && _retryCount < 3) {
+            await new Promise(r => setTimeout(r, 1000 * (_retryCount + 1)));
+            return saveSettings(settings, _retryCount + 1);
+        }
+        throw error;
+    }
 };
 
 // --- PRODUCTS API ---

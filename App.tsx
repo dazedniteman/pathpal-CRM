@@ -79,6 +79,8 @@ const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
   const [pendingContacts, setPendingContacts] = useState<PendingContact[]>([]);
   const [isPendingModalOpen, setIsPendingModalOpen] = useState(false);
   const [bulkSyncProgress, setBulkSyncProgress] = useState<{ processed: number; total: number } | null>(null);
+  const [newContactInitialData, setNewContactInitialData] = useState<{ name?: string; email?: string } | undefined>(undefined);
+  const [pendingAddQueue, setPendingAddQueue] = useState<PendingContact[]>([]);
 
   // Phase 2 state
   const [products, setProducts] = useState<Product[]>([]);
@@ -164,7 +166,7 @@ const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
         // Background sync: compute unreplied emails from existing interactions
         // (full sync happens when user clicks Sync Gmail)
         setUnrepliedEmails(prev =>
-          getContactsNeedingEmailReply(contacts, settings.gmailIgnoreList, settings.newsletterAutoFilter)
+          getContactsNeedingEmailReply(contacts, settings.gmailIgnoreList, settings.newsletterAutoFilter, settings.ignoredReplyIds)
         );
       }
     });
@@ -174,10 +176,10 @@ const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
   useEffect(() => {
     if (googleAuthState.isAuthenticated) {
       setUnrepliedEmails(
-        getContactsNeedingEmailReply(contacts, settings.gmailIgnoreList, settings.newsletterAutoFilter)
+        getContactsNeedingEmailReply(contacts, settings.gmailIgnoreList, settings.newsletterAutoFilter, settings.ignoredReplyIds)
       );
     }
-  }, [contacts, googleAuthState.isAuthenticated, settings.gmailIgnoreList, settings.newsletterAutoFilter]);
+  }, [contacts, googleAuthState.isAuthenticated, settings.gmailIgnoreList, settings.newsletterAutoFilter, settings.ignoredReplyIds]);
 
   const handleSettingsUpdate = useCallback(async (newSettings: AppSettings) => {
     setSettings(newSettings);
@@ -186,11 +188,31 @@ const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
     if (newSettings.geminiApiKey) setGeminiApiKey(newSettings.geminiApiKey);
   }, []);
 
+  const handleIgnoreReplyEmail = useCallback((replyKey: string) => {
+    setUnrepliedEmails(prev => prev.filter(e => {
+      const key = e.messageId || `${e.contact.id}-${e.date}`;
+      return key !== replyKey;
+    }));
+    setSettings(prev => {
+      const newSettings = { ...prev, ignoredReplyIds: [...(prev.ignoredReplyIds || []), replyKey] };
+      db.saveSettings(newSettings);
+      return newSettings;
+    });
+  }, []);
+
   const handleContactUpdate = useCallback(async (updatedContact: Contact) => {
     const previousContact = contacts.find(c => c.id === updatedContact.id);
     const stageChanged = previousContact?.pipelineStage !== updatedContact.pipelineStage;
 
-    if (updatedContact.pipelineStage !== 'Closed - Success' && updatedContact.partnershipType) {
+    // Only strip partnership info when moving to a pre-close outreach stage.
+    // 'Sent Product; Awaiting Feedback' is a staging area BEFORE classification —
+    // preserve any existing partnershipType/partnerDetails so data isn't lost if the
+    // user moves them back to 'Closed - Success'. This matches the handleDragEnd logic.
+    if (
+      updatedContact.pipelineStage !== 'Closed - Success' &&
+      updatedContact.pipelineStage !== 'Sent Product; Awaiting Feedback' &&
+      updatedContact.partnershipType
+    ) {
       updatedContact.partnershipType = undefined;
       updatedContact.partnerDetails = undefined;
     }
@@ -384,8 +406,8 @@ const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
       );
 
       // Apply matched interactions to contacts
+      let updatedContacts = [...contacts];
       if (result.matched.length > 0) {
-        const updatedContacts = [...contacts];
         for (const { contactId, newInteractions } of result.matched) {
           const idx = updatedContacts.findIndex(c => c.id === contactId);
           if (idx === -1) continue;
@@ -409,21 +431,34 @@ const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
         setContacts(updatedContacts);
       }
 
-      // Also do an inbox-wide scan to catch unknown senders not related to any contact
-      const bulkSinceDate = new Date();
-      bulkSinceDate.setDate(bulkSinceDate.getDate() - 180);
-      const broadScan = await syncEmailsSinceDate(contacts, bulkSinceDate);
-
-      // Merge pending from both scans (deduplicate by email)
-      const mergedPendingMap = new Map<string, PendingContact>();
-      for (const p of [...result.pending, ...broadScan.pending]) {
-        if (!mergedPendingMap.has(p.fromEmail)) mergedPendingMap.set(p.fromEmail, p);
+      // Phase 2: Inbox-wide scan — catches unknown senders missed by the per-contact pass
+      let inboxPending: PendingContact[] = [];
+      try {
+        const sinceDate = new Date();
+        sinceDate.setDate(sinceDate.getDate() - 180);
+        // syncEmailsSinceDate scans ALL inbox messages and routes to contacts or surfaces as pending
+        const inboxResult = await syncEmailsSinceDate(updatedContacts, sinceDate);
+        inboxPending = inboxResult.pending;
+      } catch (err) {
+        console.error('Inbox scan (phase 2) error — non-fatal:', err);
       }
-      const allPending = Array.from(mergedPendingMap.values());
 
-      // Show pending contacts modal if there are unmatched senders
-      if (allPending.length > 0) {
-        setPendingContacts(allPending);
+      // Merge pending contacts from both phases (dedup by email address)
+      const seenPendingEmails = new Set(result.pending.map(p => p.fromEmail));
+      const allPending = [...result.pending];
+      for (const p of inboxPending) {
+        if (!seenPendingEmails.has(p.fromEmail)) {
+          seenPendingEmails.add(p.fromEmail);
+          allPending.push(p);
+        }
+      }
+
+      // Filter out already-ignored emails before surfacing the modal
+      const ignoredSet = new Set((settings.gmailIgnoreList || []).map(e => e.value.toLowerCase()));
+      const filteredPending = allPending.filter(p => !ignoredSet.has(p.fromEmail.toLowerCase()));
+
+      if (filteredPending.length > 0) {
+        setPendingContacts(filteredPending);
         setIsPendingModalOpen(true);
       } else {
         alert(`Bulk sync complete! Synced emails for ${result.matched.length} contacts. No unknown senders found.`);
@@ -458,7 +493,14 @@ const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
     if (newStage === 'Closed - Success' && !updatedContactData.partnershipType) {
       setSelectedContact(updatedContactData);
     }
-    if (newStage !== 'Closed - Success' && updatedContactData.partnershipType) {
+    // "Sent Product; Awaiting Feedback" is a pre-close state, not an un-partner state —
+    // preserve partner info so it isn't lost if the user moves them back to Closed - Success.
+    // Only clear partnershipType when moving to any other non-closed stage.
+    if (
+      newStage !== 'Closed - Success' &&
+      newStage !== 'Sent Product; Awaiting Feedback' &&
+      updatedContactData.partnershipType
+    ) {
       updatedContactData.partnershipType = undefined;
       updatedContactData.partnerDetails = undefined;
     }
@@ -478,6 +520,15 @@ const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
       }
     }
   }, [contacts, sequences, allEnrollments]);
+
+  // Move a contact to "Sent Product; Awaiting Feedback" while preserving their partner info.
+  // Used from the "Received for Free" tab so the user can quickly fix misclassified contacts.
+  const handleMoveToAwaiting = useCallback(async (contactId: string) => {
+    const contact = contacts.find(c => c.id === contactId);
+    if (!contact) return;
+    const updated = await db.updateContact({ ...contact, pipelineStage: 'Sent Product; Awaiting Feedback' });
+    setContacts(prev => prev.map(c => c.id === contactId ? updated : c));
+  }, [contacts]);
 
   // Clear all Gmail-synced emails across all contacts (for re-sync)
   const handleClearGmailEmails = useCallback(async () => {
@@ -801,6 +852,7 @@ const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
             onSyncGmail={handleGlobalGmailSync}
             onBulkSyncGmail={handleBulkGmailSync}
             isBulkSyncing={isBulkSyncing}
+            onIgnoreEmail={handleIgnoreReplyEmail}
             onTaskUpdate={handleTaskUpdate}
             sequences={sequences}
             enrollments={allEnrollments}
@@ -826,6 +878,7 @@ const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
             onComposeEmail={handleComposeEmail}
             contactEnrollments={allEnrollments}
             sequences={sequences}
+            onMoveToAwaiting={handleMoveToAwaiting}
           />
         );
       case 'other':
@@ -846,6 +899,7 @@ const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
             onComposeEmail={handleComposeEmail}
             contactEnrollments={allEnrollments}
             sequences={sequences}
+            onMoveToAwaiting={handleMoveToAwaiting}
           />
         );
       case 'kanban':
@@ -915,7 +969,7 @@ const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
         currentView={view}
         onViewChange={(v) => setView(v as View)}
         contacts={contacts}
-        onNewContact={() => setNewContactModalOpen(true)}
+        onNewContact={() => { setPendingAddQueue([]); setNewContactInitialData(undefined); setNewContactModalOpen(true); }}
         onImport={() => setImportModalOpen(true)}
         onExport={handleExport}
         onSelectContact={setSelectedContact}
@@ -989,9 +1043,32 @@ const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
       {/* New contact modal */}
       {isNewContactModalOpen && (
         <NewContactModal
-          onClose={() => setNewContactModalOpen(false)}
-          onCreateContact={(data) => { handleCreateContact(data); setNewContactModalOpen(false); }}
+          onClose={() => {
+            // Advance to next contact in the queue (or close if none remain)
+            const remaining = pendingAddQueue.slice(1);
+            setPendingAddQueue(remaining);
+            setNewContactModalOpen(false);
+            if (remaining.length > 0) {
+              setNewContactInitialData({ name: remaining[0].fromName, email: remaining[0].fromEmail });
+              setTimeout(() => setNewContactModalOpen(true), 80);
+            } else {
+              setNewContactInitialData(undefined);
+            }
+          }}
+          onCreateContact={(data) => {
+            handleCreateContact(data);
+            const remaining = pendingAddQueue.slice(1);
+            setPendingAddQueue(remaining);
+            setNewContactModalOpen(false);
+            if (remaining.length > 0) {
+              setNewContactInitialData({ name: remaining[0].fromName, email: remaining[0].fromEmail });
+              setTimeout(() => setNewContactModalOpen(true), 80);
+            } else {
+              setNewContactInitialData(undefined);
+            }
+          }}
           pipelineStages={settings.pipelineStages}
+          initialData={newContactInitialData}
         />
       )}
 
@@ -1040,9 +1117,12 @@ const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
         <PendingContactsModal
           pendingContacts={pendingContacts}
           contacts={contacts}
-          onAddAsNew={(pending) => {
-            // Pre-fill a new contact with data from the pending email
-            // For now, open new contact modal — TODO: pre-fill fields
+          onAddBatch={(pendingList) => {
+            if (pendingList.length === 0) return;
+            // Store the full queue and open the first one; NewContactModal will advance through the rest
+            setPendingAddQueue(pendingList);
+            setNewContactInitialData({ name: pendingList[0].fromName, email: pendingList[0].fromEmail });
+            setIsPendingModalOpen(false);
             setNewContactModalOpen(true);
           }}
           onAssignToExisting={(pending, contactId) => {
@@ -1057,28 +1137,22 @@ const CrmApp: React.FC<{ session: Session }> = ({ session }) => {
               }
             }
           }}
-          onIgnore={(email) => {
-            // Add to Gmail ignore list so it's never shown again
-            const newEntry = { value: email, type: 'email' as const, addedAt: new Date().toISOString() };
+          onIgnoreBatch={(emails) => {
+            // Handle all ignored emails in one settings update (avoids stale-closure bug
+            // where calling onIgnore N times only saves the last email to the ignore list)
+            const newEntries = emails.map(email => ({
+              value: email, type: 'email' as const, addedAt: new Date().toISOString(),
+            }));
             const newSettings = {
               ...settings,
-              gmailIgnoreList: [...(settings.gmailIgnoreList || []).filter(e => e.value !== email), newEntry],
+              gmailIgnoreList: [
+                ...(settings.gmailIgnoreList || []).filter(e => !emails.includes(e.value)),
+                ...newEntries,
+              ],
             };
             setSettings(newSettings);
             db.saveSettings(newSettings);
-            setPendingContacts(prev => prev.filter(p => p.fromEmail !== email));
-          }}
-          onIgnoreAll={() => {
-            // Add ALL pending to ignore list
-            const newEntries = pendingContacts.map(p => ({
-              value: p.fromEmail, type: 'email' as const, addedAt: new Date().toISOString(),
-            }));
-            const existing = (settings.gmailIgnoreList || []).filter(e => !newEntries.some(n => n.value === e.value));
-            const newSettings = { ...settings, gmailIgnoreList: [...existing, ...newEntries] };
-            setSettings(newSettings);
-            db.saveSettings(newSettings);
-            setPendingContacts([]);
-            setIsPendingModalOpen(false);
+            setPendingContacts(prev => prev.filter(p => !emails.includes(p.fromEmail)));
           }}
           onClose={() => setIsPendingModalOpen(false)}
         />

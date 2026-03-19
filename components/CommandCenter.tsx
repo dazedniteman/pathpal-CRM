@@ -21,6 +21,7 @@ interface CommandCenterProps {
   onSyncGmail: () => void;
   onBulkSyncGmail?: () => void;
   isBulkSyncing?: boolean;
+  onIgnoreEmail?: (replyKey: string) => void;
   onTaskUpdate: (task: Task) => void;
   // Phase 3: Sequences
   sequences?: Sequence[];
@@ -76,37 +77,55 @@ const EmailReplyItem: React.FC<{
   item: UnrepliedEmail;
   onContactClick: (c: Contact) => void;
   onReply: (item: UnrepliedEmail) => void;
-}> = ({ item, onContactClick, onReply }) => (
-  <div
-    className="flex items-start gap-3 px-4 py-3 hover:bg-base-700 transition-colors group cursor-pointer"
-    onClick={() => onContactClick(item.contact)}
-  >
-    <img
-      src={item.contact.avatarUrl}
-      alt={item.contact.name}
-      className="w-8 h-8 rounded-full flex-shrink-0 mt-0.5"
-    />
-    <div className="flex-1 min-w-0">
-      <div className="flex items-baseline justify-between gap-2">
-        <span className="text-sm font-semibold text-text-primary truncate">{item.contact.name}</span>
-        <span className="text-xs text-text-muted flex-shrink-0 font-mono">{formatTimeAgo(item.date)}</span>
-      </div>
-      <p className="text-xs text-text-secondary truncate">{item.subject}</p>
-      {item.snippet && (
-        <p className="text-xs text-text-muted mt-0.5 line-clamp-1">{item.snippet}</p>
-      )}
-    </div>
-    <button
-      onClick={(e) => { e.stopPropagation(); onReply(item); }}
-      className="opacity-0 group-hover:opacity-100 flex-shrink-0 flex items-center gap-1 px-2 py-1 rounded-lg bg-outreach-dim text-outreach-light text-xs font-medium transition-all hover:bg-outreach/20"
+  onIgnore?: (replyKey: string) => void;
+}> = ({ item, onContactClick, onReply, onIgnore }) => {
+  const replyKey = item.messageId || `${item.contact.id}-${item.date}`;
+  return (
+    <div
+      className="flex items-start gap-3 px-4 py-3 hover:bg-base-700 transition-colors group cursor-pointer"
+      onClick={() => onContactClick(item.contact)}
     >
-      <svg xmlns="http://www.w3.org/2000/svg" className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-        <path strokeLinecap="round" strokeLinejoin="round" d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6" />
-      </svg>
-      Reply
-    </button>
-  </div>
-);
+      <img
+        src={item.contact.avatarUrl}
+        alt={item.contact.name}
+        className="w-8 h-8 rounded-full flex-shrink-0 mt-0.5"
+      />
+      <div className="flex-1 min-w-0">
+        <div className="flex items-baseline justify-between gap-2">
+          <span className="text-sm font-semibold text-text-primary truncate">{item.contact.name}</span>
+          <span className="text-xs text-text-muted flex-shrink-0 font-mono">{formatTimeAgo(item.date)}</span>
+        </div>
+        <p className="text-xs text-text-secondary truncate">{item.subject}</p>
+        {item.snippet && (
+          <p className="text-xs text-text-muted mt-0.5 line-clamp-1">{item.snippet}</p>
+        )}
+      </div>
+      <div className="opacity-0 group-hover:opacity-100 flex items-center gap-1 transition-all flex-shrink-0">
+        {onIgnore && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onIgnore(replyKey); }}
+            title="Dismiss"
+            className="flex items-center gap-1 px-2 py-1 rounded-lg bg-base-600 text-text-muted text-xs font-medium hover:bg-base-500 hover:text-text-secondary"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+            Dismiss
+          </button>
+        )}
+        <button
+          onClick={(e) => { e.stopPropagation(); onReply(item); }}
+          className="flex items-center gap-1 px-2 py-1 rounded-lg bg-outreach-dim text-outreach-light text-xs font-medium hover:bg-outreach/20"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6" />
+          </svg>
+          Reply
+        </button>
+      </div>
+    </div>
+  );
+};
 
 // --- Follow-up Item ---
 const FollowUpItem: React.FC<{
@@ -121,22 +140,19 @@ const FollowUpItem: React.FC<{
   const dotColor = level === 'warm' ? '#10B981' : level === 'cooling' ? '#F59E0B' : '#EF4444';
 
   return (
-    <div className="flex items-center gap-3 px-4 py-3 hover:bg-base-700 transition-colors group">
+    <div
+      className="flex items-center gap-3 px-4 py-3 hover:bg-base-700 transition-colors group cursor-pointer"
+      onClick={() => onContactClick(contact)}
+    >
       <img
         src={contact.avatarUrl}
         alt={contact.name}
-        className="w-8 h-8 rounded-full flex-shrink-0 cursor-pointer"
-        onClick={() => onContactClick(contact)}
+        className="w-8 h-8 rounded-full flex-shrink-0"
       />
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
           <span className="inline-block w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: dotColor }} />
-          <button
-            onClick={() => onContactClick(contact)}
-            className="text-sm font-medium text-text-primary hover:text-text-primary transition-colors truncate"
-          >
-            {contact.name}
-          </button>
+          <span className="text-sm font-medium text-text-primary truncate">{contact.name}</span>
         </div>
         <p className="text-xs text-text-muted">
           Last contact: <span className="font-mono">{daysAgo === 9999 ? 'Never' : `${daysAgo}d ago`}</span>
@@ -144,7 +160,7 @@ const FollowUpItem: React.FC<{
         </p>
       </div>
       <button
-        onClick={() => onDraftEmail(contact)}
+        onClick={e => { e.stopPropagation(); onDraftEmail(contact); }}
         className="opacity-0 group-hover:opacity-100 flex-shrink-0 flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium transition-all"
         style={{ background: `${accentColor}20`, color: accentColor }}
       >
@@ -267,7 +283,7 @@ const SequenceStepItem: React.FC<{
 export const CommandCenter: React.FC<CommandCenterProps> = ({
   contacts, tasks, settings, googleAuthState,
   unrepliedEmails, isSyncingGmail,
-  onContactClick, onComposeEmail, onViewChange, onSyncGmail, onBulkSyncGmail, isBulkSyncing = false, onTaskUpdate,
+  onContactClick, onComposeEmail, onViewChange, onSyncGmail, onBulkSyncGmail, isBulkSyncing = false, onIgnoreEmail, onTaskUpdate,
   sequences = [], enrollments = [], onCompleteStep,
 }) => {
   const today = new Date(); today.setHours(0, 0, 0, 0);
@@ -565,6 +581,7 @@ export const CommandCenter: React.FC<CommandCenterProps> = ({
               item={item}
               onContactClick={onContactClick}
               onReply={handleReply}
+              onIgnore={onIgnoreEmail}
             />
           ))}
         </SectionCard>

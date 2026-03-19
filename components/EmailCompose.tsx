@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { Contact, EmailDraft, GmailAlias, AppSettings, EmailTemplate, resolveTemplateVariables, InteractionType } from '../types';
-import { sendEmail, SendEmailOptions, generateTrackingToken, buildTrackingPixelUrl } from '../services/gmailService';
+import { sendEmail, saveEmailAsDraft, SendEmailOptions, generateTrackingToken, buildTrackingPixelUrl } from '../services/gmailService';
 import { getFollowUpSuggestion, getRelationshipSummary } from '../services/geminiService';
 
 interface EmailComposeProps {
@@ -35,9 +35,11 @@ export const EmailCompose: React.FC<EmailComposeProps> = ({
   const [selectedAlias, setSelectedAlias] = useState('');
   const [activeTemplateId, setActiveTemplateId] = useState<string | undefined>(undefined);
   const [isSending, setIsSending] = useState(false);
+  const [isSavingDraft, setIsSavingDraft] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState('');
   const [sendSuccess, setSendSuccess] = useState(false);
+  const [draftSaved, setDraftSaved] = useState(false);
   const [showTemplatePicker, setShowTemplatePicker] = useState(false);
   const templatePickerRef = useRef<HTMLDivElement>(null);
   const [contextSummary, setContextSummary] = useState('');
@@ -167,6 +169,33 @@ export const EmailCompose: React.FC<EmailComposeProps> = ({
     } else {
       setError(result.error || 'Failed to send email. Please try again.');
       setIsSending(false);
+    }
+  };
+
+  const handleSaveAsDraft = async () => {
+    if (!to.trim() || !subject.trim() || !body.trim()) {
+      setError('Please fill in all fields before saving as draft.');
+      return;
+    }
+    if (!isGmailConnected) {
+      setError('Gmail is not connected. Please connect Gmail in Settings.');
+      return;
+    }
+    setIsSavingDraft(true);
+    setError('');
+    const result = await saveEmailAsDraft({
+      to: to.trim(),
+      subject: subject.trim(),
+      body: body.trim(),
+      alias: selectedAlias,
+      contactId: contact?.id,
+    });
+    setIsSavingDraft(false);
+    if (result.success) {
+      setDraftSaved(true);
+      setTimeout(() => { onClose(); setDraftSaved(false); }, 1500);
+    } else {
+      setError(result.error || 'Failed to save draft. Please try again.');
     }
   };
 
@@ -391,6 +420,14 @@ export const EmailCompose: React.FC<EmailComposeProps> = ({
               Email sent successfully!
             </div>
           )}
+          {draftSaved && (
+            <div className="px-3 py-2 bg-base-700 border border-base-500 rounded-lg text-sm text-text-secondary flex items-center gap-2">
+              <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" />
+              </svg>
+              Draft saved to Gmail!
+            </div>
+          )}
         </div>
 
         {/* Footer */}
@@ -408,8 +445,19 @@ export const EmailCompose: React.FC<EmailComposeProps> = ({
               Cancel
             </button>
             <button
+              onClick={handleSaveAsDraft}
+              disabled={isSavingDraft || draftSaved || isSending || !isGmailConnected}
+              title="Save to Gmail Drafts — finish and send from Gmail"
+              className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-text-secondary hover:text-text-primary bg-base-700 hover:bg-base-600 border border-base-600 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" />
+              </svg>
+              {isSavingDraft ? 'Saving...' : 'Save as Draft'}
+            </button>
+            <button
               onClick={handleSend}
-              disabled={isSending || sendSuccess || !isGmailConnected}
+              disabled={isSending || sendSuccess || isSavingDraft || !isGmailConnected}
               className="flex items-center gap-2 px-5 py-2 text-sm font-semibold text-white bg-outreach hover:bg-outreach-light rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isSending ? (

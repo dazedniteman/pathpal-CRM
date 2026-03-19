@@ -161,6 +161,7 @@ export interface AppSettings {
   supabaseProjectRef?: string;
   lastGmailSyncAt?: string;    // ISO timestamp of last Sync Gmail run
   lastBulkSyncAt?: string;     // ISO timestamp of last Bulk Sync run
+  ignoredReplyIds?: string[];  // messageIds (or contactId+date) dismissed from "needs reply" list
 }
 
 // --- Phase 2: Product Library ---

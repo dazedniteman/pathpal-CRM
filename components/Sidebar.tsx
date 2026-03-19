@@ -68,6 +68,12 @@ const IconSequence = () => (
   </svg>
 );
 
+const IconTable = () => (
+  <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M3 10h18M3 14h18M10 4v16M3 4h18a1 1 0 011 1v14a1 1 0 01-1 1H3a1 1 0 01-1-1V5a1 1 0 011-1z" />
+  </svg>
+);
+
 const IconSettings = () => (
   <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
     <path strokeLinecap="round" strokeLinejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.096 2.572-1.065z" />
@@ -367,6 +373,18 @@ export const Sidebar: React.FC<SidebarProps> = ({
         />
 
         <SectionLabel>Tools</SectionLabel>
+
+        <NavItem
+          icon={<IconTable />}
+          label="All Contacts"
+          view="table"
+          currentView={currentView}
+          onViewChange={onViewChange}
+          badge={contacts.length}
+          accentColor="#6366F1"
+          activeColor="text-white"
+          activeBg="bg-base-600"
+        />
 
         <NavItem
           icon={<IconCheckSquare />}

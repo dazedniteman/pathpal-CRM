@@ -6,10 +6,11 @@ import { PendingContact } from '../services/gmailService';
 interface PendingContactsModalProps {
   pendingContacts: PendingContact[];
   contacts: Contact[];
-  onAddAsNew: (pending: PendingContact) => void;
+  /** Called once with ALL pending contacts marked "Add as New" — allows sequential modal opening */
+  onAddBatch: (pending: PendingContact[]) => void;
   onAssignToExisting: (pending: PendingContact, contactId: string) => void;
-  onIgnore: (fromEmail: string) => void;
-  onIgnoreAll: () => void;
+  /** Called once with ALL emails that were marked "ignore" — avoids stale-closure bug of calling onIgnore N times */
+  onIgnoreBatch: (emails: string[]) => void;
   onClose: () => void;
 }
 
@@ -23,10 +24,9 @@ interface ItemState {
 export const PendingContactsModal: React.FC<PendingContactsModalProps> = ({
   pendingContacts,
   contacts,
-  onAddAsNew,
+  onAddBatch,
   onAssignToExisting,
-  onIgnore,
-  onIgnoreAll,
+  onIgnoreBatch,
   onClose,
 }) => {
   const [itemStates, setItemStates] = useState<Record<string, ItemState>>({});
@@ -36,11 +36,6 @@ export const PendingContactsModal: React.FC<PendingContactsModalProps> = ({
     setItemStates(prev => ({ ...prev, [email]: state }));
   };
 
-  const pendingCount = useMemo(() =>
-    pendingContacts.filter(p => !itemStates[p.fromEmail] || itemStates[p.fromEmail].action === 'none').length,
-    [pendingContacts, itemStates]
-  );
-
   const filteredContacts = useMemo(() => {
     if (!searchQuery) return contacts;
     const q = searchQuery.toLowerCase();
@@ -49,19 +44,45 @@ export const PendingContactsModal: React.FC<PendingContactsModalProps> = ({
     );
   }, [contacts, searchQuery]);
 
-  const handleApply = (pending: PendingContact) => {
-    const state = itemStates[pending.fromEmail];
-    if (!state || state.action === 'none') return;
-    if (state.action === 'add') {
-      onAddAsNew(pending);
-    } else if (state.action === 'assign' && state.assignToId) {
-      onAssignToExisting(pending, state.assignToId);
-    } else if (state.action === 'ignored') {
-      onIgnore(pending.fromEmail);
+  const resolvedCount = useMemo(
+    () => Object.values(itemStates).filter(s => s.action !== 'none').length,
+    [itemStates]
+  );
+
+  const handleApplyAll = () => {
+    const toAdd: PendingContact[] = [];
+    const ignoredEmails: string[] = [];
+
+    pendingContacts.forEach(p => {
+      const state = itemStates[p.fromEmail];
+      if (!state || state.action === 'none') return;
+      if (state.action === 'add') {
+        toAdd.push(p);
+      } else if (state.action === 'assign' && state.assignToId) {
+        onAssignToExisting(p, state.assignToId);
+      } else if (state.action === 'ignored') {
+        ignoredEmails.push(p.fromEmail);
+      }
+    });
+
+    if (ignoredEmails.length > 0) {
+      onIgnoreBatch(ignoredEmails);
     }
+
+    // Pass all "add" contacts as a batch — App will open them sequentially
+    if (toAdd.length > 0) {
+      onAddBatch(toAdd);
+      return; // don't call onClose — the batch handler closes the modal
+    }
+
+    onClose();
   };
 
-  const resolvedCount = Object.values(itemStates).filter(s => s.action !== 'none' && s.action !== 'ignored').length;
+  const handleIgnoreAll = () => {
+    const allEmails = pendingContacts.map(p => p.fromEmail);
+    onIgnoreBatch(allEmails);
+    onClose();
+  };
 
   return (
     <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4 backdrop-blur-sm">
@@ -71,18 +92,16 @@ export const PendingContactsModal: React.FC<PendingContactsModalProps> = ({
           <div>
             <h2 className="text-lg font-bold text-text-primary">Pending Contacts</h2>
             <p className="text-xs text-text-muted mt-0.5">
-              {pendingContacts.length} email{pendingContacts.length !== 1 ? 's' : ''} from unknown senders found during bulk sync
+              {pendingContacts.length} email{pendingContacts.length !== 1 ? 's' : ''} from unknown senders — select an action for each, then click Apply.
             </p>
           </div>
           <div className="flex items-center gap-2">
-            {pendingCount > 0 && (
-              <button
-                onClick={onIgnoreAll}
-                className="text-xs text-text-muted hover:text-text-secondary px-3 py-1.5 bg-base-700 border border-base-600 rounded-lg transition-colors"
-              >
-                Ignore All
-              </button>
-            )}
+            <button
+              onClick={handleIgnoreAll}
+              className="text-xs text-text-muted hover:text-text-secondary px-3 py-1.5 bg-base-700 border border-base-600 rounded-lg transition-colors"
+            >
+              Ignore All
+            </button>
             <button onClick={onClose} className="text-text-muted hover:text-text-primary transition-colors p-1">
               <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
@@ -105,7 +124,7 @@ export const PendingContactsModal: React.FC<PendingContactsModalProps> = ({
               return (
                 <div
                   key={pending.fromEmail}
-                  className={`p-4 transition-all ${isResolved ? 'opacity-50' : ''}`}
+                  className={`p-4 transition-all ${isResolved ? 'opacity-60' : ''}`}
                 >
                   <div className="flex items-start gap-4">
                     {/* Sender info */}
@@ -175,10 +194,16 @@ export const PendingContactsModal: React.FC<PendingContactsModalProps> = ({
                         </select>
                       </div>
 
-                      {/* Ignore — immediate: adds to ignore list and removes from view */}
+                      {/* Ignore — marks for batch apply, NOT immediate */}
                       <button
-                        onClick={() => onIgnore(pending.fromEmail)}
-                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all bg-base-700 border border-base-600 text-text-muted hover:text-red-400 hover:border-red-500/20"
+                        onClick={() => setItemState(pending.fromEmail, {
+                          action: state.action === 'ignored' ? 'none' : 'ignored'
+                        })}
+                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                          state.action === 'ignored'
+                            ? 'bg-red-500/10 border border-red-500/30 text-red-400'
+                            : 'bg-base-700 border border-base-600 text-text-muted hover:text-red-400 hover:border-red-500/20'
+                        }`}
                       >
                         <svg xmlns="http://www.w3.org/2000/svg" className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                           <path strokeLinecap="round" strokeLinejoin="round" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
@@ -203,19 +228,10 @@ export const PendingContactsModal: React.FC<PendingContactsModalProps> = ({
               onClick={onClose}
               className="px-4 py-2 text-sm font-medium text-text-secondary bg-base-600 hover:bg-base-500 rounded-lg transition-colors"
             >
-              Cancel
+              Close
             </button>
             <button
-              onClick={() => {
-                // Apply all resolved items
-                pendingContacts.forEach(p => {
-                  const state = itemStates[p.fromEmail];
-                  if (state && state.action !== 'none') {
-                    handleApply(p);
-                  }
-                });
-                onClose();
-              }}
+              onClick={handleApplyAll}
               disabled={resolvedCount === 0}
               className="px-4 py-2 text-sm font-medium text-white bg-outreach hover:bg-outreach-light rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
             >

@@ -9,6 +9,7 @@ interface PeopleWithProductTrackProps {
   onComposeEmail: (draft: Partial<EmailDraft>, contact?: Contact) => void;
   contactEnrollments?: ContactSequence[];
   sequences?: Sequence[];
+  onMoveToAwaiting?: (contactId: string) => void;
 }
 
 type ProductTab = 'awaiting' | 'free' | 'purchased';
@@ -80,7 +81,8 @@ const FreeCard: React.FC<{
   contact: Contact;
   onContactClick: (c: Contact) => void;
   onComposeEmail: (draft: Partial<EmailDraft>, contact?: Contact) => void;
-}> = ({ contact, onContactClick, onComposeEmail }) => {
+  onMoveToAwaiting?: (contactId: string) => void;
+}> = ({ contact, onContactClick, onComposeEmail, onMoveToAwaiting }) => {
   const score = calculateHealthScore(contact);
   const daysAgo = daysSinceContact(contact);
   const pd = contact.partnerDetails;
@@ -134,7 +136,7 @@ const FreeCard: React.FC<{
         </div>
       )}
 
-      <div onClick={e => e.stopPropagation()}>
+      <div onClick={e => e.stopPropagation()} className="flex flex-col gap-1.5">
         <button
           onClick={() => onComposeEmail({ to: contact.email, alias: '' }, contact)}
           className="w-full flex items-center justify-center gap-1.5 py-1.5 text-xs font-medium text-partner-light hover:text-white bg-partner-dim hover:bg-partner/25 rounded-lg transition-colors"
@@ -144,6 +146,18 @@ const FreeCard: React.FC<{
           </svg>
           {outstanding ? '⚡ Follow Up (deliverables owed)' : 'Draft Check-in Email'}
         </button>
+        {onMoveToAwaiting && (
+          <button
+            onClick={() => onMoveToAwaiting(contact.id)}
+            className="w-full flex items-center justify-center gap-1.5 py-1.5 text-xs font-medium text-amber-400/70 hover:text-amber-300 bg-amber-950/20 hover:bg-amber-950/40 rounded-lg transition-colors border border-amber-500/15 hover:border-amber-500/30"
+            title="Move back to 'Sent Product; Awaiting Feedback' — their partner details are preserved"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6" />
+            </svg>
+            Move to Awaiting Feedback
+          </button>
+        )}
       </div>
     </div>
   );
@@ -224,8 +238,10 @@ const AwaitingCard: React.FC<{
   );
 };
 
-export const PeopleWithProductTrack: React.FC<PeopleWithProductTrackProps> = ({ contacts, onContactClick, onComposeEmail, contactEnrollments = [], sequences = [] }) => {
-  const [activeTab, setActiveTab] = useState<ProductTab>('free');
+export const PeopleWithProductTrack: React.FC<PeopleWithProductTrackProps> = ({ contacts, onContactClick, onComposeEmail, contactEnrollments = [], sequences = [], onMoveToAwaiting }) => {
+  // Default to 'awaiting' tab if there are any contacts needing feedback — they'd be invisible on 'free'
+  const hasAwaiting = contacts.some(c => c.pipelineStage === 'Sent Product; Awaiting Feedback');
+  const [activeTab, setActiveTab] = useState<ProductTab>(hasAwaiting ? 'awaiting' : 'free');
   const [searchQuery, setSearchQuery] = useState('');
 
   // Everyone with product: free recipients, purchasers, or awaiting feedback stage
@@ -414,7 +430,7 @@ export const PeopleWithProductTrack: React.FC<PeopleWithProductTrackProps> = ({ 
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                 {freeFiltered.map(c => (
-                  <FreeCard key={c.id} contact={c} onContactClick={onContactClick} onComposeEmail={onComposeEmail} />
+                  <FreeCard key={c.id} contact={c} onContactClick={onContactClick} onComposeEmail={onComposeEmail} onMoveToAwaiting={onMoveToAwaiting} />
                 ))}
               </div>
             )}

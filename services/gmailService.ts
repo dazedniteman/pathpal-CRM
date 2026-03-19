@@ -443,8 +443,7 @@ export const sendEmail = async (
   if (!token) return { success: false, error: 'Not authenticated with Gmail' };
 
   try {
-    const from = draft.alias ? `PathPal Golf <${draft.alias}>` : draft.alias;
-    const inReplyTo = draft.replyToMessageId ? `\r\nIn-Reply-To: <${draft.replyToMessageId}>` : '';
+    const from = draft.alias ? `PathPal Golf <${draft.alias}>` : (draft.from || '');
     const useHtml = !!options.trackingPixelUrl;
 
     let contentType: string;
@@ -458,16 +457,18 @@ export const sendEmail = async (
       emailBodyContent = draft.body;
     }
 
-    const rawEmail = [
+    const headers: string[] = [
       `From: ${from}`,
       `To: ${draft.to}`,
       `Subject: ${draft.subject}`,
       `MIME-Version: 1.0`,
       `Content-Type: ${contentType}`,
-      inReplyTo,
-      '',
-      emailBodyContent,
-    ].join('\r\n');
+    ];
+    // NOTE: We intentionally omit the In-Reply-To raw header here.
+    // Gmail threading is handled via the threadId field in the API request body below,
+    // which is more reliable and doesn't expose raw header text to recipients.
+
+    const rawEmail = [...headers, '', emailBodyContent].join('\r\n');
 
     // Base64url encode
     const encodedEmail = btoa(unescape(encodeURIComponent(rawEmail)))
@@ -567,8 +568,10 @@ export interface UnrepliedEmail {
 export const getContactsNeedingEmailReply = (
   contacts: Contact[],
   ignoreList: GmailIgnoreEntry[] = [],
-  newsletterAutoFilter: boolean = true
+  newsletterAutoFilter: boolean = true,
+  ignoredReplyIds: string[] = []
 ): UnrepliedEmail[] => {
+  const ignoredSet = new Set(ignoredReplyIds);
   const results: UnrepliedEmail[] = [];
 
   // Newsletter/automated email indicators
@@ -607,6 +610,10 @@ export const getContactsNeedingEmailReply = (
 
     // Check automated signals
     if (automatedSignals.some(signal => fromEmail.toLowerCase().includes(signal) || (mostRecent.notes || '').toLowerCase().includes(signal))) continue;
+
+    // Check individually ignored reply IDs
+    const replyKey = mostRecent.gmailMessageId || `${contact.id}-${mostRecent.date}`;
+    if (ignoredSet.has(replyKey)) continue;
 
     results.push({
       contact,
@@ -916,44 +923,58 @@ export const bulkSyncAllEmails = async (
 
   let processed = 0;
 
-  // Process in batches of 2 to respect Gmail API rate limits
-  for (let i = 0; i < contactsToProcess.length; i += 2) {
-    const batch = contactsToProcess.slice(i, Math.min(i + 2, contactsToProcess.length));
-
-    await Promise.all(batch.map(async (contact) => {
-      const allEmails = [contact.email, ...(contact.additionalEmails || [])].filter(Boolean);
-      const emailQuery = allEmails.map(e => `(from:${e} OR to:${e})`).join(' OR ');
-      const q = `${emailQuery} after:${afterEpoch}`;
-
+  // Helper: fetch one Gmail message with up to 3 retries on 429 (rate limit)
+  const fetchWithRetry = async (msgId: string, retries = 3): Promise<any> => {
+    for (let attempt = 0; attempt < retries; attempt++) {
       try {
-        const listRes = await window.gapi.client.gmail.users.messages.list({
-          userId: 'me',
-          q,
-          maxResults: 50,
-        });
-        const messages: { id: string }[] = listRes.result.messages || [];
+        return await window.gapi.client.gmail.users.messages.get({ userId: 'me', id: msgId, format: 'full' });
+      } catch (err: any) {
+        const isRateLimit = err?.status === 429 || err?.code === 429 || err?.result?.error?.code === 429;
+        if (isRateLimit && attempt < retries - 1) {
+          await new Promise(r => setTimeout(r, 2000 * (attempt + 1))); // 2s, 4s backoff
+        } else {
+          throw err;
+        }
+      }
+    }
+  };
 
-        const existingIds = existingMsgIds.get(contact.id) || new Set<string>();
-        // KEY FIX: Only filter out messages already synced for THIS contact.
-        // Do NOT use a global seenMessageIds — the same email legitimately belongs
-        // in multiple contacts' timelines (e.g. a thread between two contacts).
-        const newMessages = messages.filter(m => !existingIds.has(m.id));
+  // Process ONE contact at a time with a 1-second gap to stay under Gmail quota limits.
+  // (2 in parallel × 30 fetches ≈ 310+ quota-units/s which exceeds the 250/user/s cap.)
+  for (let i = 0; i < contactsToProcess.length; i++) {
+    const contact = contactsToProcess[i];
+    const allEmails = [contact.email, ...(contact.additionalEmails || [])].filter(Boolean);
+    const emailQuery = allEmails.map(e => `(from:${e} OR to:${e})`).join(' OR ');
+    const q = `${emailQuery} after:${afterEpoch}`;
 
-        if (newMessages.length === 0) return;
+    try {
+      let listRes: any;
+      // Retry list call on 429 too
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          listRes = await window.gapi.client.gmail.users.messages.list({ userId: 'me', q, maxResults: 50 });
+          break;
+        } catch (err: any) {
+          const isRateLimit = err?.status === 429 || err?.code === 429 || err?.result?.error?.code === 429;
+          if (isRateLimit && attempt < 2) {
+            await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
+          } else throw err;
+        }
+      }
+      const messages: { id: string }[] = listRes?.result?.messages || [];
 
-        // Fetch full message content in sub-batches of 5
+      const existingIds = existingMsgIds.get(contact.id) || new Set<string>();
+      const newMessages = messages.filter(m => !existingIds.has(m.id));
+
+      if (newMessages.length > 0) {
+        // Cap at 20 new messages per contact to keep API usage manageable
         const newInteractions: Interaction[] = [];
-        for (let j = 0; j < Math.min(newMessages.length, 30); j += 5) {
-          const subBatch = newMessages.slice(j, j + 5);
-          const results = await Promise.all(
-            subBatch.map(msg => window.gapi.client.gmail.users.messages.get({
-              userId: 'me',
-              id: msg.id,
-              format: 'full',
-            }))
-          );
+        for (let j = 0; j < Math.min(newMessages.length, 20); j += 3) {
+          const subBatch = newMessages.slice(j, j + 3);
+          const results = await Promise.all(subBatch.map(msg => fetchWithRetry(msg.id)));
 
           for (const res of results) {
+            if (!res) continue;
             const msgData = res.result;
             const headers: any[] = msgData.payload?.headers || [];
             const subject = headers.find((h: any) => h.name.toLowerCase() === 'subject')?.value || 'No Subject';
@@ -998,27 +1019,30 @@ export const bulkSyncAllEmails = async (
               }
             }
           }
+          // Small pause between sub-batches
+          if (j + 3 < Math.min(newMessages.length, 20)) {
+            await new Promise(r => setTimeout(r, 200));
+          }
         }
 
         if (newInteractions.length > 0) {
           const existing = matchedMap.get(contact.id) || [];
           matchedMap.set(contact.id, [...existing, ...newInteractions]);
         }
-      } catch (error: any) {
-        console.error(`Bulk sync error for ${contact.email}:`, error);
-        if (error.status === 401 || error.code === 401) signOut();
       }
+    } catch (error: any) {
+      console.error(`Bulk sync error for ${contact.email}:`, error);
+      if (error.status === 401 || error.code === 401) signOut();
+    }
 
-      processed++;
-      // Save checkpoint after each contact so we can resume on failure
-      checkpoint.processedContactIds.push(contact.id);
-      saveBulkCheckpoint(checkpoint);
-      onProgress?.(alreadyProcessedCount + processed, total, 'syncing');
-    }));
+    processed++;
+    checkpoint.processedContactIds.push(contact.id);
+    saveBulkCheckpoint(checkpoint);
+    onProgress?.(alreadyProcessedCount + processed, total, 'syncing');
 
-    // Pause between batches to avoid Gmail API rate limits
-    if (i + 2 < contactsToProcess.length) {
-      await new Promise(resolve => setTimeout(resolve, 500));
+    // 1-second gap between contacts to stay under Gmail's 250 quota-units/user/second limit
+    if (i < contactsToProcess.length - 1) {
+      await new Promise(resolve => setTimeout(resolve, 1000));
     }
   }
 
